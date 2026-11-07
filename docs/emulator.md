@@ -9,7 +9,7 @@ a second. You need no car, no head unit VM and no Docker: only Node.js and Pytho
 </p>
 
 ```sh
-python3 kit/tools/build.py redline     # once: emu.js builds again by itself after each save
+python3 kit/tools/build.py redline --preview-only  # once: emu.js builds again by itself after each save
 node kit/tools/emu.js redline          # then open http://localhost:8077
 ```
 

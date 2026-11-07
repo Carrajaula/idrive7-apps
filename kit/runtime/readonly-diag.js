@@ -9,9 +9,10 @@
  *   0x22 F1 50      the same to all units at once (functional 0xDF): which units are there,
  *                   and their SGBD index (what BMW's diagnostic tools identify a unit by)
  *   0x01 / 0x09     OBD-II current data / vehicle information, one PID, to one unit
+ *   0x2C 88 01      MHD monitor only, physical DME 0x12 (MG1.adx); no other 2C request
  *
  * Anything else throws before it reaches the transport: sessions (10), resets (11), clearing
- * faults (14), security access (27), communication control (28), dynamic identifiers (2C),
+ * faults (14), security access (27), communication control (28), other dynamic-identifier requests (2C),
  * writes (2E), I/O control (2F), routines (31), downloads (34-37), tester present (3E), DTC
  * settings (85), any functional request but 22 F1 50, and a physical request to 0xDF.
  *
@@ -43,6 +44,8 @@ const show = (n) => (Number.isInteger(n) ? hex(n) : String(n));
 /** Throws unless the request only reads (see the top of this file). Exported for the tests. */
 function check(target, sid, data, functional) {
     if (!Array.isArray(data) || !data.every(byte)) throw new Error('read-only: bad request bytes');
+    // MHD's published MG1.adx monitor: an exact exception, never generic service 2C access.
+    if (functional === false && target === 0x12 && sid === 0x2C && data.length === 2 && data[0] === 0x88 && data[1] === 0x01) return;
     if (!byte(sid) || !READ[sid]) throw new Error('read-only: service ' + show(sid) + ' is not allowed');
     if (!byte(target)) throw new Error('read-only: bad address ' + show(target));
     if (sid === 0x22 && (data.length < 2 || data.length > 2 * MAX_DIDS || data.length % 2)) throw new Error('read-only: 22 takes 1 to ' + MAX_DIDS + ' identifiers');

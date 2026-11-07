@@ -56,6 +56,19 @@ async function main() {
     assert.throws(() => check(0x12, 0x22, 'F190', false), /bad request bytes/);
     assert.throws(() => check(0x100, 0x22, [0xF1, 0x90], false), /bad address/);
 
+    // The only custom MHD monitor request: exact bytes, physical DME 0x12 only.
+    assert.doesNotThrow(() => check(0x12, 0x2C, [0x88, 0x01], false));
+    for (let n = 0; n < 256; n++) {
+        if (n !== 0x12) assert.throws(() => check(n, 0x2C, [0x88, 0x01], false));
+        if (n !== 0x88) assert.throws(() => check(0x12, 0x2C, [n, 0x01], false));
+        if (n !== 0x01) assert.throws(() => check(0x12, 0x2C, [0x88, n], false));
+    }
+    for (const data of [[], [0x88], [0x88, 0x01, 0], [0x01, 0xF3, 0x01], [0x02, 0xF3, 0x01], [0x03]]) {
+        assert.throws(() => check(0x12, 0x2C, data, false), /not allowed/);
+    }
+    assert.throws(() => check(0x12, 0x2C, [0x88, 0x01], true));
+    assert.throws(() => check(0xDF, 0x2C, [0x88, 0x01], true));
+
     /* ---------- the link: what reaches the transport ---------- */
     const t = fakeTransport((r) => {
         if (r.target === 0xDF) return [[0x12, [0x62, 0xF1, 0x50, 0x0F, 0x26, 0xE8]], [0x40, [0x7F, 0x22, 0x31]]];
@@ -64,6 +77,7 @@ async function main() {
             for (let i = 0; i < r.data.length; i += 2) out.push(r.data[i], r.data[i + 1], 0x01);     // every identifier: one byte
             return [[0x12, out]];
         }
+        if (r.target === 0x12 && r.sid === 0x2C) return [[0x12, [0x6C, 0x88].concat(new Array(36).fill(0))]];
         if (r.target === 0x12 && r.sid === 0x01) return [[0x12, [0x41].concat(r.data, [0x20])]];
         return null;                                // 0x55: never answers
     });
@@ -96,7 +110,17 @@ async function main() {
     await Promise.all([link.read(0x12, 0x1000), link.read(0x12, 0x1001), link.read(0x12, 0x1002)]);
     const gaps = t.sent.slice(n0).map((r, i, a) => (i ? r.at - a[i - 1].at : null)).slice(1);
     gaps.forEach((g) => assert.ok(g >= 38, 'requests ' + g + ' ms apart'));
-    assert.ok(t.sent.every((r) => READ[r.sid]), 'only reading services were sent');
+    const monitorRequest = [0x88, 0x01];
+    const monitor = link.physical(0x12, 0x2C, monitorRequest, 500, (u) => u[0] === 0x6C && u[1] === 0x88);
+    monitorRequest[1] = 0x02;
+    assert.strictEqual((await monitor).length, 38);
+    assert.deepStrictEqual(t.sent[t.sent.length - 1].data, [0x88, 0x01], 'monitor request is copied before queuing');
+    const sentBefore = t.sent.length;
+    await assert.rejects(link.physical(0x12, 0x2C, [0x88, 0x02], 100), /not allowed/);
+    await assert.rejects(link.physical(0x13, 0x2C, [0x88, 0x01], 100), /not allowed/);
+    assert.strictEqual(t.sent.length, sentBefore, 'other monitor commands and targets never reach transport');
+    t.sent.forEach((r) => assert.doesNotThrow(() => check(r.target, r.sid, r.data, r.target === 0xDF)));
+
     // a unit that doesn't answer: skipped after silentAfter misses, until wake()
     for (let i = 0; i < 3; i++) assert.strictEqual(await link.read(0x55, 0xF190, 30), null);
     assert.ok(link.silent(0x55));

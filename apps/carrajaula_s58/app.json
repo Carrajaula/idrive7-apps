@@ -1,0 +1,476 @@
+{
+  "id": "carrajaula_s58",
+  "title": "S58 Overview",
+  "description": "Read-only S58 dashboard with boost, WGDC, AFR, rail pressure, average knock retard, temperatures and MHD Active ethanol.",
+  "version": "0.1.3",
+  "vendor": "Carrajaula",
+  "loggingId": "OCS1",
+  "iconGlyph": "gauge",
+  "mguHmi": [
+    "ID7"
+  ],
+  "signals": {
+    "com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu": {
+      "_instances": "SystemFunctionsInternalTasuInst1",
+      "_methods": [
+        "sendTasuRequest"
+      ],
+      "_broadcasts": [
+        "sendTasuResponse"
+      ]
+    },
+    "de.bmw.infotainment.vehicle.CDS": {
+      "statusEngineSpeed2": "rs",
+      "statusEngineTemperature": "rs"
+    }
+  },
+  "screens": [
+    {
+      "name": "MAIN",
+      "kind": "canvas",
+      "title": "S58 Overview",
+      "buttons": [
+        [
+          "BTN_DIAG",
+          "Diagnostics / Overview"
+        ],
+        [
+          "BTN_DIAG_PREV",
+          "Previous diagnostics"
+        ],
+        [
+          "BTN_DIAG_NEXT",
+          "Next diagnostics"
+        ],
+        [
+          "BTN_RESET",
+          "Reset peaks"
+        ],
+        [
+          "BTN_SETTINGS",
+          "Settings"
+        ]
+      ]
+    }
+  ],
+  "settings": [
+    {
+      "key": "boostMax",
+      "label": "Boost scale",
+      "type": "number",
+      "unit": "bar",
+      "default": 3,
+      "steps": [
+        2,
+        2.5,
+        3,
+        3.5,
+        4
+      ]
+    },
+    {
+      "key": "theme",
+      "label": "Colour theme",
+      "type": "choice",
+      "default": "m_red",
+      "options": [
+        [
+          "m_red",
+          "M Red"
+        ],
+        [
+          "m_tricolour",
+          "M Tricolour"
+        ],
+        [
+          "ice",
+          "Ice White"
+        ],
+        [
+          "amber",
+          "Night Amber"
+        ]
+      ]
+    },
+    {
+      "key": "layout",
+      "label": "Screen layout",
+      "type": "choice",
+      "default": "full",
+      "options": [
+        [
+          "full",
+          "Full screen"
+        ],
+        [
+          "standard",
+          "Standard"
+        ]
+      ]
+    },
+    {
+      "key": "renderer",
+      "label": "Renderer",
+      "type": "choice",
+      "default": "auto",
+      "options": [
+        [
+          "auto",
+          "GPU 60 fps (default)"
+        ],
+        [
+          "software",
+          "Software"
+        ]
+      ]
+    },
+    {
+      "key": "demo",
+      "label": "Demo data",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Never"
+        ],
+        [
+          "on",
+          "Always"
+        ]
+      ]
+    }
+  ],
+  "config": {
+    "ecu": 18,
+    "sources": {
+      "boostAbs": [
+        {
+          "did": "4205",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.0078125,
+          "offset": 0.0,
+          "signed": false,
+          "min": 20,
+          "max": 600,
+          "timeoutMs": 1200
+        },
+        {
+          "did": "F470",
+          "bytes": 2,
+          "at": 3,
+          "factor": 0.03125,
+          "offset": 0,
+          "min": 20,
+          "max": 600,
+          "note": "OBD PID 0x70 boost pressure control: actual boost pressure sensor A (absolute), 1/32 kPa",
+          "timeoutMs": 1200
+        },
+        {
+          "did": "F487",
+          "bytes": 2,
+          "at": 1,
+          "factor": 0.03125,
+          "offset": 0,
+          "min": 20,
+          "max": 600,
+          "note": "OBD PID 0x87 intake manifold absolute pressure sensor A, 1/32 kPa",
+          "timeoutMs": 1200
+        }
+      ],
+      "baro": [
+        {
+          "did": "4201",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.00390625,
+          "offset": 0.0,
+          "signed": false,
+          "min": 50,
+          "max": 115,
+          "timeoutMs": 1200
+        },
+        {
+          "did": "F433",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 50,
+          "max": 115,
+          "note": "OBD PID 0x33 barometric pressure, kPa (101.3 when not available)",
+          "timeoutMs": 1200
+        },
+        {
+          "obd": "33",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 50,
+          "max": 115,
+          "note": "OBD service 01 PID 0x33 (same as F433)",
+          "timeoutMs": 1200
+        }
+      ],
+      "boostTarget": [
+        {
+          "did": "4AB0",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.00390625,
+          "offset": 0,
+          "min": 20,
+          "max": 400,
+          "note": "BMW boost pressure setpoint (absolute), hPa = raw * 10 / 256",
+          "timeoutMs": 1200
+        },
+        {
+          "did": "F470",
+          "bytes": 2,
+          "at": 1,
+          "factor": 0.03125,
+          "offset": 0,
+          "min": 20,
+          "max": 600,
+          "note": "OBD PID 0x70: commanded boost pressure A (absolute), 1/32 kPa",
+          "timeoutMs": 1200
+        },
+        {
+          "obd": "70",
+          "bytes": 2,
+          "at": 1,
+          "factor": 0.03125,
+          "offset": 0,
+          "min": 20,
+          "max": 600,
+          "note": "OBD service 01 PID 0x70 (same as F470)",
+          "timeoutMs": 1200
+        }
+      ],
+      "wgdc": [
+        {
+          "did": "4AAB",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.001525878906,
+          "offset": 0,
+          "signed": false,
+          "min": 0,
+          "max": 100,
+          "timeoutMs": 1200
+        }
+      ],
+      "lambda": [
+        {
+          "did": "5889",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.000244140625,
+          "offset": 0,
+          "signed": false,
+          "min": 0.1,
+          "max": 16,
+          "timeoutMs": 1200
+        },
+        {
+          "did": "5640",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.00024414,
+          "offset": 0,
+          "signed": false,
+          "min": 0.1,
+          "max": 16,
+          "timeoutMs": 1200
+        },
+        {
+          "obd": "34",
+          "bytes": 2,
+          "factor": 3.0517578125e-05,
+          "min": 0.1,
+          "max": 1.9999,
+          "timeoutMs": 1200
+        }
+      ],
+      "lpfp": [
+        {
+          "did": "58F3",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.001,
+          "offset": 0.0,
+          "signed": false,
+          "min": 0,
+          "max": 15,
+          "timeoutMs": 1200
+        },
+        {
+          "did": "5463",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.001,
+          "offset": 0.0,
+          "signed": true,
+          "min": 0,
+          "max": 15,
+          "timeoutMs": 1200
+        }
+      ],
+      "rail": [
+        {
+          "did": "58EF",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.005,
+          "offset": 0,
+          "signed": false,
+          "min": 0,
+          "max": 500,
+          "timeoutMs": 1200
+        },
+        {
+          "did": "5658",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.02,
+          "offset": 0,
+          "signed": false,
+          "min": 0,
+          "max": 500,
+          "timeoutMs": 1200
+        },
+        {
+          "did": "F423",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.1,
+          "offset": 0,
+          "min": 0,
+          "max": 500,
+          "note": "fuel rail gauge pressure (direct injection), 10 kPa per bit",
+          "timeoutMs": 1200
+        },
+        {
+          "did": "F459",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.1,
+          "offset": -1,
+          "min": 0,
+          "max": 500,
+          "note": "fuel rail absolute pressure, 10 kPa per bit",
+          "timeoutMs": 1200
+        },
+        {
+          "obd": "23",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.1,
+          "offset": 0,
+          "min": 0,
+          "max": 500,
+          "note": "OBD service 01 PID 0x23 (same as F423)",
+          "timeoutMs": 1200
+        }
+      ],
+      "iat": [
+        {
+          "did": "580F",
+          "bytes": 1,
+          "at": 0,
+          "factor": 0.75,
+          "offset": -48.0,
+          "signed": false,
+          "min": -40,
+          "max": 150,
+          "timeoutMs": 1200
+        },
+        {
+          "did": "F40F",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 150,
+          "timeoutMs": 1200
+        },
+        {
+          "did": "F477",
+          "bytes": 1,
+          "at": 1,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 150,
+          "note": "charge air cooler temperature, bank 1 sensor 1",
+          "timeoutMs": 1200
+        },
+        {
+          "obd": "0F",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 150,
+          "note": "the same PID with OBD service 01, for engine units that refuse F40F with NRC 31",
+          "timeoutMs": 1200
+        }
+      ],
+      "charge": [
+        {
+          "did": "59D4",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.0234375,
+          "offset": -273.15,
+          "signed": false,
+          "min": -40,
+          "max": 200,
+          "timeoutMs": 1200
+        }
+      ],
+      "gearbox": [
+        {
+          "ecu": 24,
+          "did": "6000",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 160,
+          "note": "ZF 8HP (GSZFBCE) _GETRIEBEOELTEMPERATUR, deg C + 40 (idrive7-apps PR #29, read on a G22)",
+          "timeoutMs": 1200
+        },
+        {
+          "ecu": 24,
+          "did": "DA12",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -48,
+          "min": -40,
+          "max": 160,
+          "note": "gearbox unit (EGS, 0x18) transmission oil temperature, deg C + 48 (from a forum report, not confirmed on a car: only shown once it changes; the replies go to the log, \"raw EGS\")",
+          "timeoutMs": 1200
+        }
+      ],
+      "knock": [
+        {
+          "did": "554C",
+          "bytes": 1,
+          "at": 0,
+          "factor": 0.375,
+          "signed": true,
+          "min": -48,
+          "max": 47.625,
+          "timeoutMs": 1200
+        }
+      ]
+    }
+  }
+}
