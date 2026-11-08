@@ -9,6 +9,7 @@
  *   0x22 F1 50      the same to all units at once (functional 0xDF): which units are there,
  *                   and their SGBD index (what BMW's diagnostic tools identify a unit by)
  *   0x01 / 0x09     OBD-II current data / vehicle information, one PID, to one unit
+ *   0x06 A0/A2-A7   S58 misfire debugger: exact physical DME 0x12 monitor reads only
  *   0x2C 88 01      MHD monitor only, physical DME 0x12 (MG1.adx); no other 2C request
  *
  * Anything else throws before it reaches the transport: sessions (10), resets (11), clearing
@@ -44,6 +45,7 @@ const show = (n) => (Number.isInteger(n) ? hex(n) : String(n));
 /** Throws unless the request only reads (see the top of this file). Exported for the tests. */
 function check(target, sid, data, functional) {
     if (!Array.isArray(data) || !data.every(byte)) throw new Error('read-only: bad request bytes');
+    if (functional === false && target === 0x12 && sid === 0x06 && data.length === 1 && (data[0] === 0xA0 || (data[0] >= 0xA2 && data[0] <= 0xA7))) return;
     // MHD's published MG1.adx monitor: an exact exception, never generic service 2C access.
     if (functional === false && target === 0x12 && sid === 0x2C && data.length === 2 && data[0] === 0x88 && data[1] === 0x01) return;
     if (!byte(sid) || !READ[sid]) throw new Error('read-only: service ' + show(sid) + ' is not allowed');
@@ -81,6 +83,7 @@ class ReadOnlyDiag {
     get ready() { return !!LINKS.get(this).p; }
     get available() { return LINKS.get(this).available; }
     get error() { return LINKS.get(this).error; }
+    get lastPhysical() { return LINKS.get(this).lastPhysical; }
     /** how often the transport said busy so far */
     get busy() { return LINKS.get(this).busy; }
 
@@ -92,14 +95,14 @@ class ReadOnlyDiag {
     cancel() { this.gen++; }
 
     /** Physical request (kit/dids.js calls this): the unit's reply bytes, or null. */
-    physical(target, sid, data, timeoutMs, accept) {
+    physical(target, sid, data, timeoutMs, accept, opts) {
         const d = Array.isArray(data) ? data.slice() : data;          // checked = sent: no change after the check
         try { check(target, sid, d, false); } catch (e) { return this.blocked(e); }
         if (this.silent(target)) return Promise.resolve(null);
         return this.queue(async () => {
             this.stats.sent++;
             const t0 = Date.now();
-            const uds = await LINKS.get(this).physical(target, sid, d, timeoutMs || 1500, accept);
+            const uds = await LINKS.get(this).physical(target, sid, d, timeoutMs || 1500, accept, opts);
             if (uds) { this.stats.ms += Date.now() - t0; this.stats.timed++; }
             if (!uds) {
                 this.stats.missed++;

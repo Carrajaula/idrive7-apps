@@ -75,5 +75,37 @@ const log = { info() {}, warn() {} };
     assert(cbs([0x6E, 0x10, 0x01]) && !cbs([0x6E, 0x10, 0x02]) && !cbs([0x62, 0x10, 0x01]) && !cbs([0x7F, 0x22, 0x31]), 'Service: 6E 1001 only');
     const did = replyTo(0x22, [0x10, 0x02]);
     assert(did([0x62, 0x10, 0x02, 0x05]) && !did([0x62, 0x10, 0x01, 0x05]) && did([0x7F, 0x22, 0x31]), 'Service: 62 1002 only');
-    console.log('Diagnostic retry/deadline/functional reply checks passed.');
+    // A shared TASU rejection is evidence, not an attributable ECU negative reply.
+    d.send = async () => {
+        d._onResponse({ errorCode: 'NO_ERROR', udsResponse: [0, 0, 0x7F, 0, 0x22] });
+        d._onResponse({ errorCode: 'APP_REQUEST_NOT_ACCEPTED' });
+        return 'NO_ERROR';
+    };
+    assert.strictEqual(await d.physical(0x12, 0x22, [0x55, 0x4C], 15, replyTo(0x22, [0x55, 0x4C])), null);
+    assert.strictEqual(d.lastPhysical.verdict, 'NO_ERROR');
+    assert(d.lastPhysical.events.includes('TASU reject 22') && d.lastPhysical.events.includes('TASU error APP_REQUEST_NOT_ACCEPTED'));
+    assert.strictEqual(d.lastPhysical.outcome, 'timeout');
+    for (const ev of ['frame', 'tasError', 'tasReject']) assert.strictEqual(d.listenerCount(ev), 0);
+    // A broadcast reject might be another client's: never discard our later matching reply.
+    d.send = async () => {
+        d.emit('tasReject', 0x33);
+        d.emit('frame', { ecu: 0x12, uds: [0x62, 0x58, 0xEF, 1] });
+        setTimeout(() => d.emit('frame', { ecu: 0x12, uds: [0x62, 0x55, 0x4C, 0] }), 5);
+        return 'NO_ERROR';
+    };
+    assert.deepStrictEqual(await d.physical(0x12, 0x22, [0x55, 0x4C], 40, replyTo(0x22, [0x55, 0x4C])), [0x62, 0x55, 0x4C, 0]);
+    assert.strictEqual(d.lastPhysical.unmatched, '62 58 EF 01');
+    assert.strictEqual(d.lastPhysical.outcome, 'reply');
+    d.send = async () => 'APP_REQUEST_TEMPORARILY_NOT_ACCEPTED';
+    await assert.rejects(d.physical(0x12, 0x22, [0x55, 0x4C], 15), /transport refused/);
+    assert.strictEqual(d.lastPhysical.outcome, 'send error');
+    assert.strictEqual(d.listenerCount('tasReject'), 0);
+    // The old S58 1200 ms window discarded a valid 1300 ms response.
+    d.send = async () => {
+        setTimeout(() => d.emit('frame', { ecu: 0x12, uds: [0x62, 0x55, 0x4C, 0] }), 1300);
+        return 'NO_ERROR';
+    };
+    assert.deepStrictEqual(await d.physical(0x12, 0x22, [0x55, 0x4C], 1500, replyTo(0x22, [0x55, 0x4C])), [0x62, 0x55, 0x4C, 0]);
+    assert(d.lastPhysical.ms >= 1200);
+    console.log('Diagnostic retry/deadline/reply/TASU observation checks passed.');
 })().catch((e) => { console.error(e); process.exit(1); });

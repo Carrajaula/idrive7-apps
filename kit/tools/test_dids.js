@@ -51,6 +51,15 @@ test('outside min..max: null, with the reason kept', async () => {
     assert.strictEqual(rd.raws[rd.key(c)].why, 'out of range');
 });
 
+test('paused ECU is not described as an unanswered transmitted request', async () => {
+    let calls = 0;
+    const rd = new DidReader({ silent: () => true, physical: async () => { calls++; return null; } }, { ecu: 0x12 });
+    const c = { did: '554C' };
+    assert.strictEqual(await rd.read(c), null);
+    assert.strictEqual(calls, 0);
+    assert.strictEqual(rd.raws[rd.key(c)].why, 'not sent: ECU paused after timeouts');
+});
+
 (async () => {
     let failed = 0;
     for (const [name, fn] of cases) {

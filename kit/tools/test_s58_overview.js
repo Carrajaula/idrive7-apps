@@ -7,41 +7,47 @@ const path = require('path');
 const Module = require('module');
 const ROOT = path.resolve(__dirname, '../..');
 const SPEC = JSON.parse(fs.readFileSync(path.join(ROOT, 'apps/carrajaula_s58/app.json'), 'utf8'));
-const { check } = require(path.join(ROOT, 'kit/runtime/readonly-diag'));
+const { check, ReadOnlyDiag } = require(path.join(ROOT, 'kit/runtime/readonly-diag'));
 const { Recorder } = require(path.join(ROOT, 'kit/runtime/record'));
 const realGauges = require(path.join(ROOT, 'kit/runtime/gauges'));
 const themes = require(path.join(ROOT, 'kit/runtime/themes'));
 const num = (x) => typeof x === 'number' && isFinite(x);
 const originalNow = Date.now, originalTimeout = global.setTimeout, originalLoad = Module._load;
-let now = 100000, app, frame, timer, reset;
+let now = 100000, app, frame, timer, reset, lastCanvas;
 const reads = [], gauges = [], texts = [], modes = { demo: 'off', boostMax: 3 };
-let visible = true, fail = false, missingAmbient = false;
+let visible = true, fail = false, missingAmbient = false, transportDown = false, activeLink, slowMissing = false;
 const clicks = {};
 const raw = { '4205': 38400, '4201': 25600, '4AB0': 51200, '4AAB': 49152,
     '5889': 4096, '58F3': 5500, '58EF': 60000, '554C': 248, '580F': 96, '59D4': 13610, '6000': 112 };
 let monitorReply = [0x6C, 0x88].concat(new Array(36).fill(0));
 monitorReply[0x11] = 17;
 class Link {
-    constructor() { this.available = true; }
+    constructor() { this.available = true; this.misses = {}; this.silentAfter = 5; this.stats = { sent: 0, missed: 0 }; activeLink = this; }
     async init() { return this; }
-    wake() {}
+    wake(ecu) { ReadOnlyDiag.prototype.wake.call(this, ecu); }
+    silent(ecu) { return ReadOnlyDiag.prototype.silent.call(this, ecu); }
     async physical(ecu, sid, data) {
         check(ecu, sid, data, false); // the real read-only trust-boundary validation
+        if (this.silent(ecu)) return null;
+        this.stats.sent++;
+        if (transportDown && ecu === 0x12) { this.misses[ecu] = (this.misses[ecu] || 0) + 1; this.stats.missed++; reads.push('DME timeout'); now += 1200; return null; }
+        this.misses[ecu] = 0;
         if (sid === 0x2C) { if (monitorReply instanceof Error) throw monitorReply; reads.push('MHD 2C 88 01'); return fail ? [0x7F, 0x2C, 0x31] : monitorReply; }
         const did = sid === 0x22 ? Buffer.from(data).toString('hex').toUpperCase() : 'OBD ' + data[0];
         reads.push(did);
         if (fail || (missingAmbient && (did === '4201' || did === 'F433' || did === 'OBD 51'))) return [0x7F, sid, 0x31];
+        if (slowMissing && raw[did] === undefined) now += 1500;
         if (raw[did] === undefined) return [0x7F, sid, 0x31];
         const candidate = Object.values(SPEC.config.sources).reduce((a, b) => a.concat(b), []).find((c) => c.did === did);
         const bytes = candidate.bytes === 1 ? [raw[did]] : [raw[did] >> 8, raw[did] & 255];
         return [0x62].concat(data, bytes);
     }
 }
-class FakeCar { data() { return { demo: false, oil: 94, coolant: 87 }; } }
+class FakeCar { data() { return { demo: false, rpm: 800, speed: 0, gear: 0, oil: 94, coolant: 87 }; } }
 const stubs = {
     './kit/mgu': { run(a) { app = a; } }, './kit/car': FakeCar,
     './kit/readonly-diag': { ReadOnlyDiag: Link },
-    './kit/gauges': { radial(cv, t, x, y, r, g) { gauges.push(g); realGauges.radial(cv, t, x, y, r, g); }, pageBottom() { return 520; } },
+    './kit/gauges': Object.assign({}, realGauges, { radial(cv, t, x, y, r, g) { gauges.push(g); realGauges.radial(cv, t, x, y, r, g); }, pageBottom() { return 520; } }),
 };
 Module._load = function (req, parent, isMain) {
     if (stubs[req]) return stubs[req];
@@ -50,18 +56,20 @@ Module._load = function (req, parent, isMain) {
 };
 Date.now = () => now;
 global.setTimeout = (fn) => { timer = fn; return 0; };
+const tick = async () => { for (let i = 0; i < 16; i++) await timer(); };
 const draw = async () => { gauges.length = texts.length = 0; await frame(); return gauges.map((g) => g.value); };
 
 (async () => {
     try {
         require(path.join(ROOT, 'apps/carrajaula_s58/main'));
         await app.start({ spec: SPEC, settings: { get: (k) => modes[k], onChange() {} },
-            signals: { watch(iface, instance, fields) { fields.statusEngineTemperature({ temperatureEngineOilDrive: 142, temperatureEngineDrive: 135 }); return Promise.resolve({}); } }, log: { warn() {} }, theme: () => themes.theme('m_red'),
-            canvas(w, h) { const cv = new Recorder(w, h), text = cv.text.bind(cv); cv.text = (s, ...a) => { texts.push(s); return text(s, ...a); }; return cv; },
-            ui: { isVisible: (name) => name === 'MAIN' && visible, image() {}, onClick(k, f) { clicks[k] = f; if (k === 'BTN_RESET') reset = f; } },
+            signals: { watch(iface, instance, fields) { fields.statusEngineTemperature({ temperatureEngineOilDrive: 142, temperatureEngineDrive: 135 }); return Promise.resolve({}); } }, log: { info() {}, warn() {} }, theme: () => themes.theme('m_red'),
+            canvas(w, h) { const cv = lastCanvas = new Recorder(w, h); cv.own = true; const text = cv.text.bind(cv); cv.text = (s, ...a) => { texts.push(s); return text(s, ...a); }; return cv; },
+            ui: { onVisible() {}, isVisible: (name) => name === 'MAIN' && visible, image() {}, onClick(k, f) { clicks[k] = f; if (k === 'BTN_RESET') reset = f; } },
+            onTab() {},
             loop(n, fps, fn) { frame = fn; },
         });
-        await new Promise(setImmediate);
+        await new Promise(setImmediate); await tick();
         assert.strictEqual(typeof clicks.BTN_DIAG, 'function', 'diagnostics is inside S58 Overview');
         const diagnostics = async () => {
             await clicks.BTN_DIAG();
@@ -84,13 +92,13 @@ const draw = async () => { gauges.length = texts.length = 0; await frame(); retu
         assert.strictEqual(v[5], 3, 'signed ECU knock mean: -8 * 0.375 -> 3 degrees retard');
         assert(texts.includes('KNK AVG') && !texts.includes('RAIL TARGET') && !texts.includes('HPFP 2'), 'knock mean replaces target pressure');
         assert(!SPEC.config.sources.railTarget && !reads.includes('5837') && !reads.includes('56C1'), 'rail target is neither configured nor polled');
-        raw['554C'] = 0; await timer();
+        raw['554C'] = 0; await tick();
         assert.strictEqual((await draw())[5], 0, 'zero retard is a valid reading');
-        raw['554C'] = 8; await timer();
+        raw['554C'] = 8; await tick();
         assert.strictEqual((await draw())[5], 3, 'mean retard displayed as a magnitude');
-        delete raw['554C']; await timer();
+        delete raw['554C']; await tick();
         assert.strictEqual((await draw())[5], null, 'missing knock mean never becomes zero or ignition timing');
-        raw['554C'] = 248; now += 31000; await timer(); await draw();
+        raw['554C'] = 248; now += 31000; await tick(); await draw();
         assert(texts.includes('17 %') && reads.includes('MHD 2C 88 01'), 'active ethanol comes from custom monitor');
         assert(!SPEC.config.sources.ethanolActive, 'no generic ethanol DID candidates');
         assert(!reads.includes('550D'), 'no generic ethanol request');
@@ -99,7 +107,7 @@ const draw = async () => { gauges.length = texts.length = 0; await frame(); retu
         const ethanolText = () => texts[texts.indexOf('ETHANOL ACTIVE') + 1];
         for (const percent of [0, 100]) {
             monitorReply = originalReply.slice(); monitorReply[0x11] = percent;
-            now += 31000; await timer(); await draw();
+            now += 31000; await tick(); await draw();
             assert.strictEqual(ethanolText(), percent + ' %', 'valid percentage boundary');
         }
         const invalid = [new Error('transport disconnected'), null, [], [0x7F, 0x2C, 0x31], originalReply.slice(0, 37), originalReply.concat(0)];
@@ -107,30 +115,82 @@ const draw = async () => { gauges.length = texts.length = 0; await frame(); retu
             const r = originalReply.slice(); r[index] = value; invalid.push(r);
         }
         for (const reply of invalid) {
-            monitorReply = reply; now += 31000; await timer(); await draw();
+            monitorReply = reply; now += 31000; await tick(); await draw();
             assert.strictEqual(ethanolText(), '-- %', 'invalid/negative monitor reply never becomes ethanol');
         }
         diag = await diagnostics();
         assert(diag.includes('invalid reply bytes'), 'invalid ethanol reply reason visible');
-        monitorReply = [0x7F, 0x2C, 0x31]; now += 31000; await timer();
+        monitorReply = [0x7F, 0x2C, 0x31]; now += 31000; await tick();
         diag = await diagnostics();
         assert(diag.includes('7F 2C 31') && diag.includes('NRC 31'), 'ECU refusal visible');
-        monitorReply = null; now += 31000; await timer();
+        monitorReply = null; now += 31000; await tick();
         diag = await diagnostics(); assert(diag.includes('no reply'), 'timeout visible');
-        monitorReply = originalReply; now += 31000; await timer(); await draw();
+        monitorReply = originalReply; now += 31000; await tick(); await draw();
+        activeLink.lastPhysical = { ms: 1300, verdict: 'NO_ERROR', pending: 0, events: ['TASU reject 22'], unmatched: '' };
+        await tick(); diag = await diagnostics();
+        assert(diag.includes('1300 ms | TASU verdict NO_ERROR') && diag.includes('observed: TASU reject 22'), 'transport observations reach the screenshot page');
+        activeLink.lastPhysical = null;
+        assert(Object.values(SPEC.config.sources).every((list) => list.every((c) => c.timeoutMs === 1500)), 'native reads use Live Data reply window');
+        // A temporary loss must not leave the DME muted for the rest of the drive.
+        transportDown = true; now += 31000; await tick();
+        assert(activeLink.silent(0x12), 'five genuine timeouts pause the DME');
+        diag = await diagnostics();
+        assert(diag.includes('not sent: ECU paused') && diag.includes('retry'), 'paused reads differ from no reply');
+        const timeouts = reads.filter((x) => x === 'DME timeout').length;
+        await tick();
+        assert.strictEqual(reads.filter((x) => x === 'DME timeout').length, timeouts, 'no immediate retry storm');
+        await draw(); assert(texts.includes('72 °C'), 'gearbox continues updating while DME is paused');
+        now += 31000; await tick();
+        assert.strictEqual(reads.filter((x) => x === 'DME timeout').length, timeouts + 5, 'persistent outage gets a bounded retry after 30 s');
+        await tick();
+        assert.strictEqual(reads.filter((x) => x === 'DME timeout').length, timeouts + 5, 'retry pauses again if DME remains silent');
+        transportDown = false; now += 31000; await tick();
+        v = await draw();
+        assert.strictEqual(v[0], 2, 'boost recovers without changing settings or restarting');
+        assert.strictEqual(v[4], 300, 'rail recovers after DME resumes');
+        assert.strictEqual(v[5], 3, 'knock recovers after DME resumes');
+        assert(!activeLink.silent(0x12));
+        assert(texts.includes('17 %'), 'MHD monitor recovers too');
+        modes.mhdMonitor = false;
+        const monitorCount = reads.filter((x) => x === 'MHD 2C 88 01').length;
+        now += 31000; await tick();
+        assert.strictEqual(reads.filter((x) => x === 'MHD 2C 88 01').length, monitorCount, 'monitor isolation sends no service 2C');
+        assert.strictEqual((await draw())[4], 300, 'standard UDS keeps refreshing with monitor disabled');
+        assert.strictEqual(ethanolText(), '-- %', 'disabled monitor never leaves an old ethanol value');
+        diag = await diagnostics(); assert(diag.includes('disabled in Settings'), 'disabled monitor is explained');
+        modes.mhdMonitor = true; now += 31000; await tick(); await draw();
+        assert(texts.includes('17 %'), 'monitor can be enabled again');
+        const saved = Object.assign({}, raw);
+        for (const did of ['4AAB', '5889', '58F3', '580F', '59D4']) delete raw[did];
+        slowMissing = true; now += 31000;
+        for (let i = 0; i < 15; i++) {
+            await timer();
+            const liveGauges = await draw();
+            assert.strictEqual(liveGauges[0], 2, 'fallback probes must not starve working boost');
+            assert.strictEqual(liveGauges[4], 300, 'fallback probes must not starve working rail');
+        }
+        slowMissing = false; Object.assign(raw, saved); now += 31000; await tick();
+        // The debugger is idle until explicitly refreshed, then shares polling with the gauges.
+        assert(!reads.includes('OBD 162') && !reads.includes('F6A2'));
+        await clicks.BTN_MISFIRE(); await draw();
+        const refresh=lastCanvas.targets.find(t=>t.key==='mf-Refresh / Retry'); assert(refresh);
+        await refresh.run(); await tick();
+        assert(reads.includes('OBD 162') && reads.includes('F6A2'), 'Mode 06 detection and fallback use existing transport');
+        await clicks.BTN_MISFIRE(); await clicks.BTN_DIAG();
+        assert.strictEqual((await draw())[0],2,'debugger probing does not stop regular boost polling');
         visible = false;
-        let count = reads.length; await timer();
+        let count = reads.length; await tick();
         assert.strictEqual(reads.length, count, 'hidden screen does not poll');
-        visible = true; missingAmbient = true; await timer();
+        visible = true; missingAmbient = true; await tick();
         assert.strictEqual((await draw())[0], null, 'missing ambient never becomes a fabricated boost');
-        missingAmbient = false; now += 31000; await timer();
+        missingAmbient = false; now += 31000; await tick();
         v = await draw(); assert.strictEqual(v[0], 2);
         now += 10001;
         assert((await draw()).every((x) => x === null), 'stale diagnostic readings expire');
         assert.strictEqual(ethanolText(), '-- %', 'ethanol also expires');
         diag = await diagnostics(); assert(diag.includes('STALE'), 'stale readings marked with age');
-        await timer(); await draw();
-        modes.demo = 'on'; await draw(); count = reads.length; await timer();
+        await tick(); await draw();
+        modes.demo = 'on'; await draw(); count = reads.length; await tick();
         assert.strictEqual(reads.length, count, 'demo sends no reads');
         assert(texts.includes('DEMO - SIMULATED DATA'), 'demo is labelled');
         assert(num(gauges[5].value) && gauges[5].value <= 1.1, 'demo averages six corrections, not their maximum');
@@ -138,10 +198,10 @@ const draw = async () => { gauges.length = texts.length = 0; await frame(); retu
         diag = await diagnostics(); assert(diag.includes('DEMO: requests paused') && !diag.includes('62 55 4C F8'), 'demo cannot present live replies');
         modes.demo = 'off';
         assert((await draw()).every((x) => x === null), 'demo/live transition drops old readings');
-        fail = true; await timer();
+        fail = true; await tick();
         assert((await draw()).every((x) => x === null), 'failed reads never show zero');
         await reset();
-        console.log('S58 checks passed: units, ECU knock mean, MHD ethanol boundaries/rejections, stale/error handling and demo isolation.');
+        console.log('S58 checks passed: units, ECU knock mean, MHD ethanol boundaries/rejections, stale/error handling, fair fallback probing, bounded ECU recovery and demo isolation.');
     } finally {
         Date.now = originalNow; global.setTimeout = originalTimeout; Module._load = originalLoad;
     }

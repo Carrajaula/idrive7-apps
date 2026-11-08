@@ -44,6 +44,7 @@ class Diag extends EventEmitter {
         this.busyMs = 1000;           // pause before a retry when the transport is busy (x 1, 2, 3, 4)
         this.busyLog = true;          // log each busy verdict (false: only count them in .busy)
         this.busy = 0;
+        this.lastPhysical = null;
     }
 
     async init() {
@@ -136,30 +137,46 @@ class Diag extends EventEmitter {
      */
     async physical(target, sid, data, timeoutMs, accept, opts) {
         let t, hardTimer, onFrame, finish, done = false;
+        const trace = { at: Date.now(), ecu: target, request: [sid].concat(data || []).map((b) => hex(b)).join(' '),
+            verdict: 'waiting', events: [], unmatched: '', pending: 0, ms: 0, outcome: 'waiting' };
+        const observe = (event) => { if (trace.events.length < 4 && trace.events.indexOf(event) < 0) trace.events.push(event); };
+        const onError = (e) => observe('TASU error ' + String(e).slice(0, 120));
+        const onReject = (code) => observe('TASU reject ' + hex(code));
         const got = new Promise((resolve) => {
             finish = (v) => {
                 if (done) return;
                 done = true;
                 clearTimeout(t); clearTimeout(hardTimer);
-                this.removeListener('frame', onFrame); resolve(v);
+                this.removeListener('frame', onFrame);
+                this.removeListener('tasError', onError); this.removeListener('tasReject', onReject);
+                trace.ms = Date.now() - trace.at;
+                if (trace.outcome === 'waiting') trace.outcome = v ? 'reply' : 'timeout';
+                this.lastPhysical = trace;
+                resolve(v);
             };
             onFrame = (f) => {
                 if (f.ecu !== target) return;
                 if (f.uds[0] === 0x7F && f.uds[2] === 0x78) {      // response pending: never the reply itself
                     if (f.uds[1] !== sid) return;                       // another request's (another app's) 78
+                    trace.pending++;
                     clearTimeout(t);
                     t = setTimeout(() => finish(null), opts && opts.pendingTimeoutMs || 10000);
                     return;
                 }
-                if (accept && !accept(f.uds)) return;
+                if (accept && !accept(f.uds)) { trace.unmatched = f.uds.map((b) => hex(b)).join(' '); return; }
                 finish(f.uds);
             };
-            this.on('frame', onFrame);
+            this.on('frame', onFrame); this.on('tasError', onError); this.on('tasReject', onReject);
             if (opts && opts.hardTimeoutMs) hardTimer = setTimeout(() => finish(null), opts.hardTimeoutMs);
         });
-        try { this._check(await this.send(target, sid, data, opts)); } catch (e) { finish(null); throw e; }
+        try { trace.verdict = await this.send(target, sid, data, opts); this._check(trace.verdict); }
+        catch (e) { trace.outcome = 'send error'; trace.error = String(e.message || e); finish(null); throw e; }
         if (!done && !t) t = setTimeout(() => finish(null), timeoutMs || 4000); // from when the transport took it
-        return got;
+        const result = await got;
+        // TASU events are broadcast to every client: retain them as observations, never as an ECU NRC.
+        if (!result || trace.events.length) this.log.warn('UDS ' + hex(target) + ' TX ' + trace.request + ': ' + trace.outcome
+            + ' after ' + trace.ms + ' ms; verdict ' + trace.verdict + (trace.events.length ? '; observed ' + trace.events.join(', ') : ''));
+        return result;
     }
 }
 

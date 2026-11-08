@@ -45,6 +45,7 @@ jobs:
           python-version: '3.12'
       - run: node kit/tools/test_runtime.js
       - run: node kit/tools/test_dids.js
+      - run: node kit/tools/test_diag_options.js
       - run: node kit/tools/test_engine.js
       - run: node kit/tools/test_edrive.js
       - run: node kit/tools/test_widget_fixes.js
@@ -56,6 +57,7 @@ jobs:
       - run: node kit/tools/test_service_engine.js
       - run: node kit/tools/test_car_vitals.js
       - run: node kit/tools/test_s58_overview.js
+      - run: node kit/tools/test_s58_misfire.js
       - run: node kit/tools/test_live_data.js
       - run: node kit/tools/test_zh.js
       - run: cd kit/tools && python3 test_zh.py
