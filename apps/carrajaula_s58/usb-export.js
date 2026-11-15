@@ -7,14 +7,15 @@ const unescapeMount = s => s.replace(/\\([0-7]{3})/g, (_, n) => String.fromCharC
 function drives() {
     const mounts = fs.readFileSync('/proc/mounts', 'utf8');
     const seen = new Set();
-    return mounts.split('\n').flatMap(line => {
+    return mounts.split('\n').reduce((out, line) => {
         const f = line.split(/\s+/);
-        if (f.length < 4) return [];
+        if (f.length < 4) return out;
         const mount = unescapeMount(f[1]);
-        if (!/^\/(?:media\/[^/]+|run\/media\/[^/]+\/[^/]+)$/.test(mount) || path.resolve(mount) !== mount || seen.has(mount)) return [];
+        if (!/^\/(?:media\/[^/]+|run\/media\/[^/]+\/[^/]+)$/.test(mount) || path.resolve(mount) !== mount || seen.has(mount)) return out;
         seen.add(mount);
-        return [{ mount, writable: f[3].split(',').includes('rw') }];
-    });
+        out.push({ mount, writable: f[3].split(',').includes('rw') });
+        return out;
+    }, []);
 }
 function copy(jsonFile, mount) {
     const drive = drives().find(d => d.mount === mount);

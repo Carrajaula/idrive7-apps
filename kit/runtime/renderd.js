@@ -67,6 +67,7 @@ class RenderClient extends EventEmitter {
         this.claimed = null;         // the claims sent on this connection (JSON), null: none yet
         this.native = false;         // this connection speaks mgu-render/1 (X_READY came)
         this.info = null;            // X_READY: { touch, controller, frontGate }
+        this.area = null;            // X_READY: the app area { x, y, w, h } (screen px), null: not told
         this.onScreen = null;        // X_STATE: the renderer shows us (null: not told)
     }
 
@@ -77,6 +78,11 @@ class RenderClient extends EventEmitter {
         if (this.opts.file) {
             this.fd = fs.openSync(this.opts.file, 'w');
             this.connected = this.ready = true;
+            // testing: the screen another head unit's renderer tells (MGU_RENDERD_SCREEN=2880x960: iDrive 8)
+            const m = /^(\d+)x(\d+)$/.exec(process.env.MGU_RENDERD_SCREEN || '');
+            if (m) this.screen = { w: Number(m[1]), h: Number(m[2]) };
+            // as the car's renderer: touch routing on, so the kit runs the screen (tabs, no button bar)
+            this.touch = process.env.MGU_RENDERD_TOUCH !== '0';
             this._write(msg(M.HELLO, this._hello()));
             if (this.opts.native) { this.native = true; this._write(this._u32msg(X.MODE, [X_MODE_LAYER])); }
             setImmediate(() => this.emit('ready', this.screen));
@@ -94,7 +100,7 @@ class RenderClient extends EventEmitter {
             this._reset();
             this.inbuf = Buffer.alloc(0);   // (a message cut off with the last connection)
             s.setNoDelay && s.setNoDelay(true);
-            this.native = false; this.info = null; this.onScreen = null;
+            this.native = false; this.info = null; this.area = null; this.onScreen = null;
             this.claimed = null;
             this._write(msg(M.HELLO, this._hello()));
             // upstream renderers take these before READY; they are sent again once READY came
@@ -111,9 +117,18 @@ class RenderClient extends EventEmitter {
             const was = this.ready;
             this.connected = this.ready = this.native = false; this.sock = null; this.waiting = false; this.onScreen = null;
             if (was) { this.log.warn('renderd: connection closed'); this.emit('close'); }
-            if (!this.closed) this.retry = setTimeout(() => { this.retry = null; this.connect(); }, 3000);
+            if (!this.closed) this.retry = setTimeout(() => { this.retry = null; this.connect(); }, this.soon ? 0 : 3000);
+            this.soon = false;
         });
         return this;
+    }
+    /** A fresh connection at once: the renderer's READY again, with what it offers now (its capabilities are
+     * those of the moment it answered HELLO). */
+    reconnect() {
+        if (this.closed || !this.sock || !this.ready) return false;
+        this.soon = true;
+        this.sock.destroy();
+        return true;
     }
     /**
      * Have the iDrive controller to ourselves (the HMI ignores the knob, press and tilt while it
@@ -196,6 +211,8 @@ class RenderClient extends EventEmitter {
                 const caps = p.readUInt32LE(8);
                 this.native = true;
                 this.info = { touch: !!(caps & 1), controller: !!(caps & 2), frontGate: !!(caps & 4) };
+                // the app area (where the HMI leaves room for apps, in screen px): after the embed box
+                this.area = p.length >= 44 ? { x: p.readInt32LE(28), y: p.readInt32LE(32), w: p.readInt32LE(36), h: p.readInt32LE(40) } : null;
             } else if (type === E.READY) {
                 this.ready = true; this.errLogged = false;
                 this.screen = { w: p.readUInt32LE(4), h: p.readUInt32LE(8) };

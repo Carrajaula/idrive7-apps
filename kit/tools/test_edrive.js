@@ -37,13 +37,22 @@ let app = null, diag = null, reader = null, values = {};
 class FakeDiag extends EventEmitter { constructor() { super(); this.available = false; diag = this; } init() {} }
 // the battery unit's values by name; other units (the 48 V battery, the converter, the engine unit's 12 V
 // sensor) answer `replies` by '<ecu>:<DID>' (the data after the DID, hex), through the real reader
-let replies = {};
+let replies = {}, asked = [];
 const RealReader = require(path.join(KIT, 'dids')).DidReader;
 class FakeReader extends RealReader {
     constructor() {
         super({ physical: async (ecu, sid, req) => {
+            asked.push({ ecu, sid, req: req.slice() });
+            // OBD service 01 ('<ecu>:OBD <PID>'); 'NRC xx': the unit refuses
+            if (sid === 0x01) {
+                const o = replies[ecu + ':OBD ' + req[0].toString(16).toUpperCase().padStart(2, '0')];
+                return !o ? null : /^NRC/.test(o) ? [0x7F, sid, parseInt(o.slice(4), 16)] : [0x41, req[0]].concat(o.split(' ').map((x) => parseInt(x, 16)));
+            }
             const did = ((req[0] << 8) | req[1]).toString(16).toUpperCase().padStart(4, '0'), r = replies[ecu + ':' + did];
+            if (r && /^NRC/.test(r)) return [0x7F, sid, parseInt(r.slice(4), 16)];
             if (r) return [0x62, req[0], req[1]].concat(r.split(' ').map((x) => parseInt(x, 16)));
+            // the 12 V voltage (vals.v12): the engine unit's control module voltage (F442, 1 mV)
+            if (ecu === 18 && did === 'F442' && typeof values.v12 === 'number') return [0x62, 0xF4, 0x42, Math.round(values.v12 * 1000) >> 8, Math.round(values.v12 * 1000) & 0xFF];
             // the battery unit (0x07) is there while the test gives it a charge value (null: no reading now)
             if (ecu === 7 && values.soc !== undefined) {
                 return did === 'DDBC' && typeof values.soc === 'number' ? [0x62, req[0], req[1], (values.soc * 10) >> 8, (values.soc * 10) & 0xFF] : [0x7F, sid, 0x31];
@@ -101,7 +110,7 @@ function context(dir, set) {
  * "Read now" button (the health read too), exit() the process exiting (its exit handlers only: kept off this process's)
  */
 async function boot(dir, vals, set) {
-    [MAIN, LIVE, path.join(ROOT, 'apps', 'edrive', 'range.js')].forEach((f) => { delete require.cache[f]; });
+    [MAIN, LIVE, path.join(ROOT, 'apps', 'edrive', 'range.js'), path.join(ROOT, 'apps', 'edrive', 'battery12.js')].forEach((f) => { delete require.cache[f]; });
     require(MAIN);
     values = vals; timers = [];
     const ctx = context(dir, set), before = process.listeners('exit');
@@ -325,7 +334,7 @@ const checks = [
         b.signal('statusBattery2', { conditionBatteryChargingCondition: 77 });
         now += 20000; await b.read();
         const t = await b.draw();
-        assert(t.includes('77 %'), 'the car signal\'s charge: ' + t.join(' | '));
+        assert(t.includes('77') && t.includes('the car\'s signal'), 'the car signal\'s charge: ' + t.join(' | '));
     }],
     ['9. no hybrid system: the 12 V battery with the battery sensor\'s values', async () => {
         const dir = tmp('none');
@@ -335,7 +344,63 @@ const checks = [
         assert.deepStrictEqual([state(dir).noHybrid, state(dir).no48, !!state(dir).mild48], [true, true, false], JSON.stringify(state(dir)));
         const t = await b.draw();
         assert(t.includes('12 V BATTERY') && t.includes('CURRENT') && !t.includes('48 V SYSTEM'), t.join(' | '));
-        ['+2.4 A', '84 %', '92 %', '40 A', 'No hybrid system answered.'].forEach((s) => assert(t.includes(s), s + ' in ' + t.join(' | ')));
+        ['+2.4 A', '84', '92 %', '40 A', 'CHARGING', 'Hybrid car? Settings > Hybrid system'].forEach((s) => assert(t.includes(s), s + ' in ' + t.join(' | ')));
+        assert(t.includes('HISTORY'), 'the History tab');
+        replies = {};
+    }],
+    ['11. a G20 320i (no hybrid system): 402B all FF, F442 refused - the voltage from OBD 42, kept; charge and capacity, History, regen, parked', async () => {
+        const dir = tmp('g20');
+        const v = (x) => { const m = Math.round(x * 1000); return [m >> 8, m & 0xFF].map((n) => n.toString(16).padStart(2, '0')).join(' '); };
+        replies = {
+            '18:402B': 'FF FF FF FF FF FF', '18:F442': 'NRC 31', '18:OBD 42': v(12.65), '24:F442': v(12.6),
+            // 40AD: 48 % now, 50 52 49 47 51 before; time per band 0-40 .. 90-100 %
+            '18:40AD': '30 00 32 00 34 00 31 00 2F 00 33 00 00 0A 01 F4 00 64 00 32 00 0A 00 00 FF FF',
+            '18:40A9': '5A 00 50', '18:59AA': '5C',             // (no 5854 / 4604: the battery's temperature, the alternator)
+        };
+        asked = [];
+        const b = await boot(dir, {}, { demo: 'off', hybrid: 'no' });
+        await b.read();
+        for (let k = 0; k < 3; k++) { now += 11000; await b.read(); }
+        let t = await b.draw();
+        assert(t.includes('12.65'), 'the voltage from OBD 42: ' + t.join(' | '));
+        assert.strictEqual(state(dir).v12Pick, SPEC.config.battery.v12.findIndex((c) => c.ecu === 18 && c.obd === '42'), 'the source kept');
+        assert(t.includes('VOLTAGE, LAST 2 MIN') && !t.includes('POWER'), 'no current from this engine unit: the voltage trend in its place');
+        ['48', '~43 / 90 Ah', '90 Ah  (orig. 80)', '50  52  49  47  51 %', '92 %', 'HEALTH (SOH)', 'low - use a battery charger']
+            .forEach((x) => assert(t.includes(x), x + ' in ' + t.join(' | ')));
+        // the temperature and the alternator this engine unit does not give: the engine and the voltage's source in their place
+        assert(!t.includes('TEMPERATURE') && !t.includes('ALTERNATOR') && t.includes('OUTSIDE') && t.includes('ENGINE') && t.includes('VOLTAGE FROM')
+            && t.includes('DME  ·  OBD 42'), 'rows: ' + t.join(' | '));
+        assert(asked.every((q) => q.sid === 0x22 || q.sid === 0x01), 'read-only: UDS 22 / OBD 01 only');
+        // the next reads ask the source that answered first (no time lost on the refusing / FF ones)
+        asked = []; now += 2000; await b.read();
+        const volt = asked.filter((q) => q.ecu === 18 && (q.sid === 0x01 || [0xF442, 0x5853].indexOf((q.req[0] << 8) | q.req[1]) >= 0));
+        assert.deepStrictEqual(volt.map((q) => q.sid), [0x01], 'only OBD 42 asked for the voltage');
+        // a read or two missed (the engine unit busy): the last voltage stays up, dimmed, not a blank
+        delete replies['18:OBD 42'];
+        now += 15000; await b.read();
+        t = await b.draw();
+        assert(t.includes('12.65') && !t.includes('--.--'), 'the last voltage kept: ' + t.join(' | '));
+        // charging while the car slows down: REGEN
+        replies['18:OBD 42'] = v(14.6);
+        now += 2000; await b.read();
+        b.drive(60); now += 1000; b.drive(57);
+        t = await b.draw();
+        assert(t.includes('slowing down: braking energy charges the battery') && t.includes('14.60'), 'regen: ' + t.join(' | '));
+        // History: the charge the car recorded, time per charge band
+        await b.page();
+        t = await b.draw();
+        assert(t.includes('HISTORY') && t.includes('TIME SPENT PER CHARGE BAND') && t.includes('40-60%') && t.includes('75%'), t.join(' | '));
+        // parked: nothing is read, so the car can sleep; Read now asks again
+        // (the page left open: drawn every few seconds - a gap counts as opening it again, and opening it reads)
+        b.drive(0); await b.page();                  // back to the 12 V battery page
+        for (let k = 0; k < 11 * 15; k++) { now += 4000; await b.draw(); }
+        asked = [];
+        await b.read();
+        assert.deepStrictEqual(asked.filter((q) => q.ecu === 18 || q.ecu === 24), [], 'no reads parked');
+        t = await b.draw();
+        assert(t.includes('PAUSED') && t.includes('14.60'), 'paused, the last voltage: ' + t.join(' | '));
+        await b.readNow();
+        assert(asked.some((q) => q.ecu === 18), 'Read now reads');
         replies = {};
     }],
     ['10. a plug-in hybrid stays as it is; the setting picks the system', async () => {
@@ -346,6 +411,36 @@ const checks = [
         assert((await b.draw()).includes('RANGE'));
         assert((await (await boot(dir, {}, { demo: 'off', hybrid: '48v' })).draw()).includes('48 V SYSTEM'));
         assert((await (await boot(dir, {}, { demo: 'off', hybrid: 'no' })).draw()).includes('ALTERNATOR'));
+    }],
+    ['12. the car locked and left (VehicleCondition: parked, nobody in it): nothing is read, so it can sleep; the charge done meanwhile is logged from the level before it', async () => {
+        const dir = tmp('left');
+        const b = await boot(dir, { soc: 6, soh: 90, v12: 12.5 }, { demo: 'off' });
+        const reads = [], value = reader.value.bind(reader);
+        reader.value = (k, l) => { reads.push(k); return value(k, l); };
+        now += 20000; await b.read();
+        assert(reads.indexOf('soc') >= 0, 'in use: the charge is read');
+        b.signal('VehicleCondition', { statusConditionVehicle: 'PARKEN_BN_IO' });
+        reads.length = 0; asked = [];
+        values.soc = 72; for (let i = 0; i < 3; i++) { now += 20000; await b.read(); }
+        values.soc = 100; now += 3 * 3600000; await b.read();
+        assert.deepStrictEqual([reads, asked], [[], []], 'locked and left: nothing read');
+        b.signal('VehicleCondition', { statusConditionVehicle: 'WOHNEN' });
+        now += 20000; await b.read();
+        assert(reads.indexOf('soc') >= 0, 'someone in the car again: read');
+        const s = state(dir).session || state(dir).lastCharge;
+        assert(s && s.from === 6 && s.to === 100, 'the charge from 6 %: ' + JSON.stringify(s));
+    }],
+    ['13. a charge jump right after the head unit wakes, its clock not yet set and a speed sent: logged from the level before it', async () => {
+        const dir = tmp('jump');
+        let b = await boot(dir, { soc: 6, soh: 90, v12: 12.5 }, { demo: 'off' });
+        now += 20000; await b.read();
+        b.exit();
+        // the next start: the clock as at switch-off (2 min later), the car already rolling, 71 %
+        now += 120000;
+        b = await boot(dir, { soc: 71, soh: 90, v12: 12.5 }, { demo: 'off' });
+        b.drive(8); await b.read();
+        const c = state(dir).lastCharge;
+        assert(c && c.from === 6 && c.to === 71, 'the charge 6 -> 71: ' + JSON.stringify(c));
     }],
     ['7. charge totals keep English singular and plural', async () => {
         const dir = tmp('charge-counts'), today = new Date(), current = today.getTime();
@@ -370,7 +465,7 @@ const checks = [
     }
     dirs.forEach((d) => fs.rmSync(d, { recursive: true, force: true }));
     if (failed.length) process.exit(1);
-    console.log('eDrive system checks passed (48 V mild hybrid / none / setting).');
+    console.log('eDrive system checks passed (48 V mild hybrid / none / G20 12 V: voltage source kept, charge, History, regen, parked / setting).');
     console.log('eDrive checks passed (charge logged once across restarts / baseline without seat heating / kWh without SOH / use + otherKw saved).');
     process.exit(0);
 })().catch((e) => { console.error(e); process.exit(1); });

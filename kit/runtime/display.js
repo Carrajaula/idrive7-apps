@@ -52,7 +52,7 @@ const PAGER = ['BTN_PAGE', 'BTN_PREV'];
 const PAGE_GAP = 6;
 
 /* HMI geometry on the 1920 x 720 centre display (measured on the unit's HMI) */
-const HMI = {
+const HMI7 = {
     screen: { w: 1920, h: 720 },
     img: { x: 124, y: 82, w: 1600, h: 520 },   // canvas screen's image component
     // bar buttons: from x 132, each as wide as its label + 180 px. The label's width in the HMI
@@ -65,6 +65,20 @@ const HMI = {
     headBg: '#000000',                          // the HMI's title / status strip
     status: { x: 1340, h: 76 },                 // status icons top right (notifications .. clock)
 };
+/* iDrive 8 (Hmi8, 2880 x 960; mgu-render tells apps that size there): the app goes in the area under the HMI's
+ * status bar the renderer reports (X_READY; its default 0,76 2880x764 here), no back arrow column, no HMI status
+ * icons in it to keep clear. Not measured on a car yet. */
+const HMI8 = Object.assign({}, HMI7, {
+    screen: { w: 2880, h: 960 },
+    area: { x: 0, y: 76, w: 2880, h: 764 },
+    img: { x: 0, y: 76, w: 2880, h: 764 },
+    left: 0,
+    colEnd: 0,
+    status: { x: 2880, h: 0 },
+});
+/* the geometry for the screen the renderer reports; the current one in HMI (set by Display._place) */
+const geometryFor = (scr) => (scr && scr.w === HMI8.screen.w && scr.h === HMI8.screen.h ? HMI8 : HMI7);
+let HMI = HMI7;
 /* full-screen layout, in the surface's pixels (it covers the whole screen) */
 const FULL = {
     headH: 80,                                  // header in the HMI's title strip
@@ -74,6 +88,7 @@ const FULL = {
     src: { x: 12, y: 38, w: 1576, h: 482 },
 };
 const LAYOUTS = ['full', 'standard'];
+const CTL_RETRIES = 3, CTL_RETRY_MS = 30000;   // connecting again for the controller (_ctlRetry)
 
 // the HMI's page animation when a screen opens (the picture shows after it)
 const SHOW_DELAY_MS = 350;
@@ -174,6 +189,7 @@ class Display {
             if (this.gpu !== gpu) return;
             clearTimeout(this.frontTimer);
             if (st.front) {
+                this._ctlRetry(gpu);
                 if (this.blocked) { this.blocked = false; this.log.info('display: renderer has the app in front again'); this.lastWords = null; this._syncVisible(); this._grab(); this._hmiBar(); }
                 return;
             }
@@ -195,6 +211,22 @@ class Display {
         if (this.grabbing) gpu.grab(true);
     }
 
+    /**
+     * In front without the controller: the renderer offers it only if no other renderer held it when this app
+     * connected (the Store's open while this app restarts after its update: seen on the car, the controller then
+     * never reached the app). Connected again, at most CTL_RETRIES times, CTL_RETRY_MS apart, so it asks again;
+     * a head unit whose HMI has no controller gate stays without after those. Never on iDrive 8: the Store's
+     * renderer there has no controller to offer (the gate is iDrive 7's HMI only), so every connection would go
+     * again, the picture gone for a moment and every resource uploaded again each time.
+     */
+    _ctlRetry(gpu) {
+        const now = Date.now();
+        if (geometryFor(gpu.screen) !== HMI7) return;
+        if (!gpu.native || !gpu.info || gpu.info.controller || !this.ownable() || (this.ctlTries || 0) >= CTL_RETRIES || now - (this.ctlTryT || 0) < CTL_RETRY_MS) return;
+        this.ctlTries = (this.ctlTries || 0) + 1; this.ctlTryT = now;
+        if (gpu.reconnect()) this.log.info('display: in front without the controller, connecting to the renderer again (' + this.ctlTries + '/' + CTL_RETRIES + ')');
+    }
+
     /** the iDrive controller to this app alone while on (GPU renderer + mgu-inputgate.so needed) */
     grab(on) {
         this.grabbing = !!on;
@@ -212,7 +244,8 @@ class Display {
     /** own() but for the placement, which depends on it (the bar's height): the renderer and layout allow it. */
     ownable() {
         const g = this.gpu;
-        return !!(g && g.ready && g.native && g.touch && this.layout() === 'full' && g.screen.w === HMI.screen.w && g.screen.h === HMI.screen.h);
+        const h = geometryFor(g && g.screen);
+        return !!(g && g.ready && g.native && g.touch && this.layout() === 'full' && g.screen.w === h.screen.w && g.screen.h === h.screen.h);
     }
     /** Settings is the header's last tab where the kit runs the screen (the app has a Settings button). */
     hasSettings() { return !!(this.screen && (this.screen.buttons || []).some((b) => b[0] === 'BTN_SETTINGS')); }
@@ -476,14 +509,17 @@ class Display {
         const logical = (q) => (r ? q : { i: q.i, x: (q.x - pl.ox) / pl.scale, y: (q.y - pl.oy) / pl.scale, w: q.w / pl.scale, h: q.h / pl.scale });
         this.tabs = (rects || []).map(logical);
         const W = pl.w, hx = HMI.left - pl.x, by = pl.h - this.barH();
+        // the header as far as the HMI's status corner shows through it (iDrive 7); iDrive 8 has none in the
+        // app's area: the whole row is the app's, as a tap there must not count as the HMI's (mgu-render closes)
+        const he = HMI.status.h ? this.headEnd : W;
         if (this.own()) {
             // header (tabs), page and the slim bar: the back column and the status corner stay the HMI's
-            this.gpu.claim([{ x: hx, y: 0, w: this.headEnd - hx, h: this.headH() }, { x: hx, y: this.headH(), w: W - hx, h: pl.h - this.headH() }].map(logical));
+            this.gpu.claim([{ x: hx, y: 0, w: he - hx, h: this.headH() }, { x: hx, y: this.headH(), w: W - hx, h: pl.h - this.headH() }].map(logical));
             return;
         }
         if (!this.onTab || this.tabs.length < 2) { this.gpu.claim([]); return; }
         this.gpu.claim(r ? [{ x: 0, y: 0, w: r.w, h: r.h }]
-            : [{ x: hx, y: 0, w: this.headEnd - hx, h: this.headH() }, { x: hx, y: this.headH(), w: W - hx, h: by - this.headH() }].map(logical));
+            : [{ x: hx, y: 0, w: he - hx, h: this.headH() }, { x: hx, y: this.headH(), w: W - hx, h: by - this.headH() }].map(logical));
     }
 
     /** GPU path gone (or off): the HMI's own image shows again - push a frame now. */
@@ -521,21 +557,30 @@ class Display {
         return LAYOUTS.indexOf(v) >= 0 ? v : 'full';
     }
 
+    /** The app's area on a screen with one (iDrive 8): the renderer's (X_READY), when it is a sane one, else h.area. */
+    _area(h) {
+        const a = this.gpu && this.gpu.area;
+        return a && a.w >= 1000 && a.h >= 400 && a.x >= 0 && a.y >= 0 && a.x + a.w <= h.screen.w && a.y + a.h <= h.screen.h ? a : h.area;
+    }
+
     /** Renderer placement for the current layout. */
     _place() {
         if (!this.gpu || !this.gpu.ready) return;
         const scr = this.gpu.screen, v = this.layout();
+        HMI = geometryFor(scr);
         let pl;
-        if (v === 'standard' || scr.w !== HMI.screen.w || scr.h !== HMI.screen.h) {
-            pl = { x: HMI.img.x, y: HMI.img.y, w: HMI.img.w, h: HMI.img.h, scale: 1, ox: 0, oy: 0, full: false };
+        // iDrive 8 has only the full layout (no HMI page box of iDrive 7's size to sit in)
+        if ((v === 'standard' && HMI === HMI7) || scr.w !== HMI.screen.w || scr.h !== HMI.screen.h) {
+            pl = { x: HMI7.img.x, y: HMI7.img.y, w: HMI7.img.w, h: HMI7.img.h, scale: 1, ox: 0, oy: 0, full: false };
         } else {
-            // the surface covers the whole screen, so the HMI's own bar can't show under the back
-            // arrow column; the page content goes right of that column
-            const w = scr.w - HMI.left, h = scr.h, src = FULL.src;
+            // iDrive 7: the surface covers the whole screen, so the HMI's own bar can't show under the back
+            // arrow column; the page content goes right of that column. iDrive 8: the area under its status bar
+            const a = HMI.area ? this._area(HMI) : { x: 0, y: 0, w: scr.w, h: scr.h };
+            const w = a.w - HMI.left, h = a.h, src = FULL.src;
             const ah = h - this.headH() - this.barH();
             const s = Math.floor(Math.min(w / src.w, ah / src.h) * 1000) / 1000;
             pl = {
-                x: 0, y: 0, w: scr.w, h, full: true,
+                x: a.x, y: a.y, w: a.w, h, full: true,
                 scale: s,
                 ox: HMI.left + Math.round((w - src.w * s) / 2 - src.x * s),
                 oy: Math.round(this.headH() + (ah - src.h * s) / 2 - src.y * s),
@@ -898,4 +943,4 @@ class Display {
     onLayout(fn) { this.layoutHandlers.push(fn); }
 }
 
-module.exports = { Display, HMI, FULL };
+module.exports = { Display, HMI: HMI7, HMI7, HMI8, FULL };

@@ -20,8 +20,12 @@ function dme(kind) {
         inflight--;
         const addr = () => Buffer.from(data.slice(1, 5)).toString('hex').toUpperCase();
         if (kind === 'bm3') {
-            if (sid === 0x2C) return [0x6C, 0x02, 0xF3, 0x01];
-            if (sid === 0x22) return [0x62, 0xF3, 0x01].concat(Array.from(Buffer.from('BM3_R#011000#')));
+            if (sid === 0x2C) return [0x6C, data[0], 0xF3, 0x01];
+            if (sid === 0x22) {
+                const marker = Buffer.alloc(255);
+                marker.write('BM3_R#011000#');
+                return [0x62, 0xF3, 0x01].concat(Array.from(marker));
+            }
             if (sid === 0x23) return [0x63].concat(memory[addr()].slice(0, data[5]));
             if (sid === 0x3D) { memory[addr()] = data.slice(6); return [0x7D]; }
             if (sid === 0x2E) return [0x6E].concat(data.slice(0, 2));
@@ -73,12 +77,15 @@ function dsc(kind) {
         st.calls.push((target === 0x29 ? 'dsc ' : target === 0x19 ? 'lmv ' : target === 0x39 ? 'vip ' : 'other ') + req);
         let r;
         // G05 xDrive45e (issue #52): IB_G05 at 0x29 answers DBE1 but it does nothing; VIP_G05 at 0x39
-        const g05 = kind === 'g05' || kind === 'g05vip33';
+        // g05ice: a diesel X5 (IB_G05 0F2500, VIP_G05 0F2520) as measured: the VIP takes the job only with the engine
+        // off and the ignition on; the engine running gets NRC 33
+        const g05 = kind === 'g05' || kind === 'g05vip33' || kind === 'g05ice';
         if (g05 && target === 0x29 && sid === 0x22 && data[0] === 0xF1) r = [0x62, 0xF1, 0x50, 0x00, 0x0F, 0x25, 0x00];
-        else if (g05 && target === 0x39 && sid === 0x22 && data[0] === 0xF1) r = [0x62, 0xF1, 0x50, 0x00, 0x0F, 0x25, 0x30];
+        else if (g05 && target === 0x39 && sid === 0x22 && data[0] === 0xF1) r = [0x62, 0xF1, 0x50, 0x00, 0x0F, 0x25, kind === 'g05ice' ? 0x20 : 0x30];
         else if (g05 && target === 0x39 && sid === 0x22 && data[0] === 0xDB && data[1] === 0x44) r = [0x62, 0xDB, 0x44, st.vip === undefined ? 1 : st.vip];
         else if (g05 && target === 0x39 && sid === 0x2E && data[0] === 0xDB && data[1] === 0x2F) {
-            if (kind === 'g05vip33') r = [0x7F, 0x2E, 0x33];
+            if (kind === 'g05vip33' || (kind === 'g05ice' && st.engine)) r = [0x7F, 0x2E, 0x33];
+            else if (kind === 'g05ice') { st.vip = data[2]; r = [0x6E, 0xDB, 0x2F]; }
             else if (!st.engine) r = [0x7F, 0x2E, 0x22];
             else { st.vip = data[2]; r = [0x6E, 0xDB, 0x2F]; }
         } else if (target === 0x39 && sid === 0x22 && data[0] === 0xF1) r = [0x62, 0xF1, 0x50, 0x00, 0x0F, 0x25, 0x30];  // G22: VIP_G05 too
@@ -94,6 +101,7 @@ function dsc(kind) {
         } else if (sid === 0x2E && data[0] === 0xDB && data[1] === 0xE1) {
             if ((kind === 'session' || kind === 'nosession' || kind === 'session7e') && st.session !== 3) r = [0x7F, 0x2E, kind === 'session7e' ? 0x7E : 0x7F];
             else if (kind === 'refuse' || (st.engine && !g01)) r = [0x7F, 0x2E, st.engine ? 0x33 : 0x22];
+            else if (kind === 'dsc33') r = [0x7F, 0x2E, 0x33];      // G26 outside diagnostic mode (issue #63)
             else { st.lmv = data[2]; st.written = true; r = [0x6E, 0xDB, 0xE1]; }
         } else r = [0x7F, sid, 0x31];
         if (accept) assert(accept(r), 'reply filter rejects the answer to ' + req);
@@ -101,6 +109,51 @@ function dsc(kind) {
     };
     st.link = { available: true, diag: { available: true, physical } };
     return st;
+}
+
+/** The PIN in front of the Engine Map tab (pin.js): choose, confirm, unlock, wrong tries, off only with the PIN. */
+function pinChecks() {
+    const { PinLock, WAIT_MS } = require('../../apps/live_adjustments/pin');
+    const vals = { mapPin: false, mapPinCode: {} };
+    let clock = 1000;
+    let pin = null;
+    const set = (k, v) => { vals[k] = v; pin.settingChanged(k, v); };
+    pin = new PinLock({ get: (k) => vals[k], set, now: () => clock });
+    const type = (d) => String(d).split('').forEach((c) => pin.digit(Number(c)));
+    assert.strictEqual(pin.locked(), false, 'locked with the setting off');
+    set('mapPin', true);
+    assert.strictEqual(pin.locked(), true);
+    assert.strictEqual(pin.view().mode, 'choose');
+    type('1234'); assert.strictEqual(pin.view().mode, 'again');
+    type('9999'); assert.strictEqual(pin.view().mode, 'choose', 'two different PINs were taken');
+    type('1234'); type('1234');
+    assert.strictEqual(pin.locked(), false, 'not open after choosing');
+    assert(vals.mapPinCode.hash && !JSON.stringify(vals.mapPinCode).includes('1234'), 'the PIN is saved as it was typed');
+    pin.lock();
+    assert.strictEqual(pin.locked(), true, 'still open after leaving the screen');
+    type('12'); pin.back(); type('235');            // 1235: wrong
+    assert.strictEqual(pin.locked(), true, 'Delete did not take the digit back');
+    assert(/4 tries left/.test(pin.view().msg));
+    assert.strictEqual(pin.view('Burbles').title, 'Burbles is locked');
+    type('1234'); assert.strictEqual(pin.locked(), false, 'the right PIN did not open it');
+    pin.lock();
+    for (let i = 0; i < 5; i++) type('0000');
+    assert(pin.view().wait > 0, 'no wait after 5 wrong PINs');
+    type('1234'); assert.strictEqual(pin.locked(), true, 'taken during the wait');
+    clock += WAIT_MS + 1;
+    type('1234'); assert.strictEqual(pin.locked(), false);
+    // off while locked: back on until the PIN; off while open: at once
+    pin.lock();
+    set('mapPin', false);
+    assert.strictEqual(vals.mapPin, true, 'turned off without the PIN');
+    assert.strictEqual(pin.view().title, 'Enter the PIN to turn the lock off');
+    type('1234');
+    assert.strictEqual(vals.mapPin, false);
+    assert.deepStrictEqual(vals.mapPinCode, {}, 'the PIN outlived the lock');
+    set('mapPin', true); type('5555'); type('5555');
+    set('mapPin', false);
+    assert.strictEqual(vals.mapPin, false, 'open: not off at once');
+    assert.deepStrictEqual(vals.mapPinCode, {});
 }
 
 async function xdriveChecks() {
@@ -339,6 +392,25 @@ async function xdriveChecks() {
     await s.x.requestOff(); await s.x.requestOff();
     assert.deepStrictEqual(writes(s.d), [], 'sent with the engine running');
 
+    // the ICE G05 (VIP 0F2520): the job with the engine off and the ignition on, never while it runs
+    s = await mk('on', 'g05ice', { rpm: 800, condition: 10 });
+    s.d.engine = true;
+    assert.strictEqual(s.x.view().vipIndex, '0F2520');
+    await s.x.requestOff(); await s.x.requestOff();
+    assert.deepStrictEqual(s.d.calls.filter((c) => / 2e /.test(c)), [], 'sent with the engine running');
+    assert(/engine off/.test(s.x.note), s.x.note);
+    s.car.v.condition = 7; s.car.v.rpm = 0; s.d.engine = false;
+    await s.x.requestOff(); await s.x.requestOff();
+    assert.deepStrictEqual(s.d.calls.filter((c) => / 2e /.test(c)), ['vip 2e db 2f 00']);
+    assert.strictEqual(s.x.noteType, 'go');
+    assert(/start the engine without switching the ignition off/.test(s.x.note), s.x.note);
+    assert(!s.d.calls.some((c) => /^dsc (2e|10|11)/.test(c)), 'sent something to the IB: ' + s.d.calls);
+    // its NRC 33 says the engine runs (an rpm the car still reports while it stops), not an unlock
+    s = await mk('on', 'g05ice', { rpm: 0, condition: 7 });
+    s.d.engine = true;
+    await s.x.requestOff(); await s.x.requestOff();
+    assert(/engine is running/.test(s.x.note) && !/unlock/.test(s.x.note), s.x.note);
+
     // a VIP that wants security access (G05, issue #52): said plainly, nothing recorded as done
     s = await mk('on', 'g05vip33', { rpm: 0, condition: 10 });
     s.d.engine = true;
@@ -365,6 +437,12 @@ async function xdriveChecks() {
     await s.x.requestOff(); await s.x.requestOff();
     assert.deepStrictEqual(writes(s.d), ['dsc 2e db e1 00']);
 
+    // NRC 33 with the engine off and every check green (G26 outside diagnostic mode, issue #63): the tab says
+    // to try diagnostic mode, nothing recorded as done
+    s = await mk('on', 'dsc33');
+    await s.x.requestOff(); await s.x.requestOff();
+    assert(/DSC refused: .*diagnostic mode: press Start 3 times without the brake/.test(s.x.note), s.x.note);
+    assert.strictEqual(s.x.requested, false);
     // the DSC refuses the write (e.g. parking brake off): shown, nothing recorded as done
     s = await mk('on', 'refuse');
     await s.x.requestOff(); await s.x.requestOff();
@@ -619,7 +697,8 @@ async function xdriveChecks() {
     s.d.calls.length = 0; s.d.maxInflight = 0;
     await Promise.all([s.tune.refresh(), s.tune.refresh()]);
     assert.strictEqual(s.d.maxInflight, 1, 'two refreshes overlapped');
-    assert.strictEqual(s.d.calls.filter((c) => c.startsWith('2c')).length, 1);
+    assert.strictEqual(s.d.calls.filter((c) => c === '2c 03 f3 01').length, 1);
+    assert.strictEqual(s.d.calls.filter((c) => c.startsWith('2c 02')).length, 1);
     const pending = s.tune.refresh();
     assert.strictEqual(s.tune.view().busy, true);
     await s.tune.applyBurbles(false);
@@ -630,5 +709,6 @@ async function xdriveChecks() {
     assert.strictEqual(s.tune.verified, true);
 
     await xdriveChecks();
-    console.log('Live Adjustments tune checks passed (off / MHD echo / cooling rpm gate / BM3 read-back + ASD / wrong tune / untuned / late link / one request at a time / xDrive).');
+    pinChecks();
+    console.log('Live Adjustments tune checks passed (off / MHD echo / cooling rpm gate / BM3 read-back + ASD / wrong tune / untuned / late link / one request at a time / xDrive / Engine Map PIN).');
 })().catch((e) => { console.error(e); process.exit(1); });

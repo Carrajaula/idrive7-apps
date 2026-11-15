@@ -10,6 +10,8 @@ for(const key of ['statSync','mkdirSync','openSync']) mock[key]=(p,...a)=>fs[key
 mock.realpathSync=p=>{const real=fs.realpathSync(map(p));return real===map(p)?p:real;};
 const load=Module._load;
 Module._load=function(req,parent,main){return req==='fs'&&parent&&parent.filename.endsWith('usb-export.js')?mock:load.call(this,req,parent,main);};
+const flatMap=Array.prototype.flatMap;
+Array.prototype.flatMap=undefined; // The car runs Node 8, which has no flatMap.
 const U=require(path.join(ROOT,'apps/carrajaula_s58/usb-export'));Module._load=load;
 assert.deepEqual(U.drives(),[{mount,writable:true}]);
 const source=path.join(dir,'misfire-export-2026-11-08T12-00-00-000Z.json');
@@ -26,4 +28,5 @@ fs.writeFileSync(source,JSON.stringify(report));
 const realpath=mock.realpathSync;mock.realpathSync=p=>p.endsWith('/S58-Overview')?'/somewhere/else':realpath(p);
 assert.throws(()=>U.copy(source,mount),/symbolic link/);mock.realpathSync=realpath;
 const open=mock.openSync;mock.openSync=()=>{throw Object.assign(new Error('Permission denied'),{code:'EACCES'});};assert.throws(()=>U.copy(source,mount),/Permission denied/);mock.openSync=open;
+Array.prototype.flatMap=flatMap;
 console.log('USB export: mount detection, exact JSON, flush, collisions, removal, read-only, invalid JSON, symlink and permission failures passed.');

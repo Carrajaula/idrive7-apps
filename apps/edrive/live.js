@@ -31,6 +31,7 @@ const { ScaledCanvas, withAlpha } = require('./kit/canvas');
 const G = require('./kit/gauges');
 const { hex } = require('./kit/diag');
 const { t: translate, plural } = require('./kit/i18n');
+const { FastKw } = require('./fastkw');
 
 const W = 1600, H = 520;
 const GO = '#2fd27a';
@@ -38,6 +39,11 @@ const IDLE_KW = 0.3;              // below this either way the pack is idle
 const SHOWN_MS = 3000;            // the screen counts as shown when drawn this recently
 const POWER_S = 0.1;              // power read while shown: as fast as the car answers
 const BG_POWER_S = 2;             // power read in the background (drive totals) at most this often
+/* Another app showing the battery's power or charge (Cluster functions' HUD / cluster panel) asks for it here:
+ * { t, power, soc }, renewed each second while it shows them. While fresh, the power is read as fast as while
+ * shown, and the charge with the slow reads, with the app closed too. */
+const WANTED = '/tmp/mgu-edrive-wanted.json', WANTED_FRESH_MS = 3000;
+const CI_DIR = '/dev/shm/cluster-info';    // Cluster Info's shared folder (eroobeeroo/idrive7-cluster-info)
 const TRACE_S = 120;              // power trace on the Battery page
 const SEAT_KW = [0, 0.04, 0.07, 0.1];   // seat heating per level 0..3 (estimate)
 const WHEEL_KW = 0.06;                  // steering-wheel heating (estimate)
@@ -91,6 +97,12 @@ module.exports = function live(ctx, sh) {
 
     /* ---------- this part's own values (the battery unit's); the car's are eDrive's (L) ---------- */
     const live = { v: null, vT: 0, a: null, kw: null, kwT: 0, soc: null, cellV: null, cellT: null, coolant: null, limits: null, slowT: {} };
+
+    /* ---------- the power as fast as the car's eDRIVE needle (fastkw.js), learned from the readings below ----------
+     * eDrive's signal handler gives each needle here (L.needleFn); setting "kwFast": fast, or the readings only */
+    const fast = new FastKw();
+    const fastOn = () => settings.get('kwFast') !== 'readings';
+    L.needleFn = (drive, recup) => { fast.needle(drive, recup, Date.now()); if (fastOn() && sh.onPower) sh.onPower(); };
 
     /* ---------- UDS: candidates with several fields on one reply ---------- */
     const pick = {};
@@ -163,12 +175,31 @@ module.exports = function live(ctx, sh) {
         }
         return now - lastActiveT < IDLE_AFTER_MOVE;
     };
-    const inUse = () => driving() || Date.now() - lastUserT < IDLE_AFTER_USER;
+    // (never while the car is locked and left: main.js, its VehicleCondition)
+    const inUse = () => !L.left && (driving() || Date.now() - lastUserT < IDLE_AFTER_USER);
     const touched = () => { const was = inUse(); lastUserT = Date.now(); if (!was) { log.info('in use again (user)'); schedulePower(); readSlow(); } };
     // a live page drawn after a pause: it was just opened
     const drawn = () => { const opened = Date.now() - lastDrawT > 5000; lastDrawT = Date.now(); if (opened) touched(); };
     // the app's screen, or its home-screen widget (only while driving): either one gets the fast power reads
     const shown = () => inUse() && (Date.now() - lastDrawT < SHOWN_MS || (!!(ctx.widget && ctx.widget.active()) && driving()));
+    // what another app asks for (WANTED), looked at no more than twice a second
+    let wantedT = 0, wantedV = {};
+    const wanted = () => {
+        const now = Date.now();
+        if (now - wantedT > 500) {
+            wantedT = now;
+            try { const w = JSON.parse(fs.readFileSync(WANTED, 'utf8')); wantedV = w && now - w.t < WANTED_FRESH_MS ? w : {}; } catch (e) { wantedV = {}; }
+            // Cluster Info and its family (eroobeeroo/idrive7-cluster-info) ask in their folder: wanted*.json { t, power }
+            if (!wantedV.power) {
+                try {
+                    fs.readdirSync(CI_DIR).filter((n) => /^wanted(-[\w.-]+)?\.json$/.test(n)).forEach((n) => {
+                        try { const w = JSON.parse(fs.readFileSync(path.join(CI_DIR, n), 'utf8')); if (w && now - w.t < WANTED_FRESH_MS && w.power) wantedV = Object.assign({}, wantedV, { power: true, ci: true }); } catch (e) { /* half written */ }
+                    });
+                } catch (e) { /* no such folder: no Cluster Info */ }
+            }
+        }
+        return wantedV;
+    };
 
     /* ---------- power: fast reads, drive totals, traces ---------- */
     const trip = { out: 0, regen: 0, charged: 0, climate: 0, peakOut: 0, peakIn: 0, since: Date.now() };
@@ -207,9 +238,11 @@ module.exports = function live(ctx, sh) {
         }
         trip.peakOut = Math.max(trip.peakOut, kw);
         if (G.isNum(L.speed) && L.speed > 1) trip.peakIn = Math.max(trip.peakIn, -kw);
+        fast.ac(L.acKw); fast.reading(kw, now);
         live.kw = kw; live.kwT = now;
         push(trace, TRACE_S, kw);
         learnBaseline(kw, now);
+        if (sh.onPower) sh.onPower();
     }
     // how fast power is really read while shown (logged every 30 s): reads, time per read, time queued
     const perf = { n: 0, ms: 0, wait: 0, maxWait: 0, t: Date.now() };
@@ -219,11 +252,16 @@ module.exports = function live(ctx, sh) {
         if (perf.n && shown()) {
             log.info('power reads: ' + (perf.n / ((now - perf.t) / 1000)).toFixed(1) + '/s, ' + Math.round(perf.ms / perf.n) + ' ms each, queued '
                 + Math.round(perf.wait / perf.n) + ' ms avg / ' + perf.maxWait + ' ms max, poll ' + POWER_S + ' s');
+            const f = fast.fit;
+            log.info('fast power: ' + (f.n ? 'full needle ' + f.a.toFixed(2) + ' kW/unit, regen ' + f.b.toFixed(2) + ', rest ' + f.c.toFixed(1)
+                + ' kW, off by ' + (f.err === null ? '--' : f.err.toFixed(1)) + ' kW, ' + f.n + ' readings' : 'no needle yet'));
         }
         Object.assign(perf, { n: 0, ms: 0, wait: 0, maxWait: 0, t: now });
     }
     async function readPower() {
         // a car without the current identifier: only every 30 s. One that has answered keeps being asked
+        // (no high-voltage battery: nothing to ask; the tries cost the 12 V reads seconds every 30 s)
+        if (sh.kind && sh.kind() !== 'phev') return;
         if (!diag.available || !inUse() || (!iOk && iFail >= 3 && Date.now() - iTry < 30000)) return;
         const queued = Date.now();
         await exclusive(async () => {
@@ -260,7 +298,7 @@ module.exports = function live(ctx, sh) {
     let powerTimer = null;
     function schedulePower() {
         clearTimeout(powerTimer);
-        const s = shown() ? POWER_S : Math.max(BG_POWER_S, POWER_S);
+        const s = shown() || wanted().power ? POWER_S : Math.max(BG_POWER_S, POWER_S);
         // 0.1 s: as fast as the battery unit answers (one read waits for the last)
         powerTimer = setTimeout(() => readPower().then(schedulePower, schedulePower), Math.max(60, s * 1000 - (s <= 0.1 ? 1000 : 0)));
     }
@@ -275,8 +313,11 @@ module.exports = function live(ctx, sh) {
     let pageDrawT = 0;
     const pageShown = () => Date.now() - pageDrawT < SHOWN_MS;
     async function readSlow() {
-        if (!diag.available || !shown()) return;
+        // only the charge, for another app: while the car is in use, as every read (parked and left, the car sleeps)
+        const asked = !shown() && inUse() && !!wanted().soc;
+        if (!diag.available || !(shown() || asked)) return;
         for (const name of SLOW) {
+            if (asked && name !== 'soc') continue;
             if (!(cfg.slow[name] || []).length || Date.now() < (slowSkipUntil[name] || 0)) continue;
             if (!pageShown() && name !== 'soc' && name !== 'limits') continue;
             // each try is its own turn on the link, so a power read can go between them
@@ -552,8 +593,9 @@ module.exports = function live(ctx, sh) {
         const slowOk = (k) => live.slowT[k] && now - live.slowT[k] < SLOW_KEEP;
         const staleAfter = Math.max(30, settings.get('slowPoll') * 4) * 1000;
         const stale = {}; SLOW.forEach((k) => { stale[k] = !!live.slowT[k] && now - live.slowT[k] > staleAfter ? now - live.slowT[k] : 0; });
+        const read = live.kwT && now - live.kwT < KW_KEEP ? live.kw : null, fk = fastOn() ? fast.now(now) : null;
         return {
-            demo: false, kw: live.kwT && now - live.kwT < KW_KEEP ? live.kw : null, kwAge: live.kwT ? now - live.kwT : null, stale,
+            demo: false, kw: G.isNum(fk) ? fk : read, kwAge: G.isNum(fk) ? 0 : live.kwT ? now - live.kwT : null, kwRead: read, kwFast: G.isNum(fk), stale,
             v: fresh(live.vT, 60) ? live.v : fresh(L.lscVT, 60) ? L.lscV : null, a: fresh(live.kwT, 10) ? live.a : null,
             speed: L.speed, engine: engineOn(), soc: slowOk('soc') ? live.soc : null,
             cellV: slowOk('cellV') ? live.cellV : null, cellT: slowOk('cellT') ? live.cellT : null, carT: L.batt,
@@ -933,6 +975,15 @@ module.exports = function live(ctx, sh) {
             const d = data(), pw = power(d, t);
             powerBar(cv, t, x, y, w, pw.kw, limitsKw(d), { label: 'Live battery usage', pw });
         },
+        /** Cluster Info (or its family) asks for the power now. */
+        clusterInfoWants() { return !!wanted().ci; },
+        /** For other apps (SHARED): the last reading, whether the power is the fast one, the kW the battery allows now. */
+        powerShare() {
+            const d = data(), l = limitsKw(d);
+            return { kwRead: d.kwRead, fast: !!d.kwFast, out: l && G.isNum(l.out) ? l.out : null, in: l && G.isNum(l.in) ? l.in : null };
+        },
+        /** The fast power's fit (fastkw.js): { a, b, c, n, err }. */
+        fastFit() { return fast.fit; },
         /** The battery's power now as the pages show it: { kw, text, col, what } (kw null: no reading). */
         powerNow(t) { return power(data(), t); },
         /**

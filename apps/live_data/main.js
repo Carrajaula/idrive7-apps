@@ -117,6 +117,12 @@ mgu.run({
         link.init().catch((e) => log.warn('diagnostic link: ' + e));
         const useDemo = () => settings.get('demo') === 'on' || (settings.get('demo') === 'auto' && !link.available);
         const details = () => !!settings.get('details');
+        // temperatures are read and kept in °C; shown in °F when Settings says so
+        const fahrenheit = () => settings.get('tempUnit') === 'f';
+        const shownUnit = (u) => (u === '°C' && fahrenheit() ? '°F' : u);
+        const shownTemp = (v) => (v && typeof v.n === 'number' && v.u === '°C' && fahrenheit() ? Object.assign({}, v, { n: v.n * 1.8 + 32, u: '°F' }) : v);
+        const formatShown = (x, f) => (x && !x.why && typeof x.value === 'number' && f && f.u === '°C' && fahrenheit()
+            ? format(Object.assign({}, x, { value: x.value * 1.8 + 32, text: undefined }), Object.assign({}, f, { u: '°F' })) : format(x, f));
 
         /* ---------- state ---------- */
         const UNITS_FILE = path.join(ctx.dataDir, 'units.json');
@@ -253,7 +259,7 @@ mgu.run({
         const refusal = (r) => (details() ? 'refused: ' + (NRC[r.nrc] || 'NRC ' + hex(r.nrc)) : 'not available');
         /** what a Useful entry shows: { text, dim, warn } */
         function usefulValue(u, ur) {
-            const it = ur.item, v = usefulRaw(u, ur);
+            const it = ur.item, v = shownTemp(usefulRaw(u, ur));
             if (typeof v.n === 'number') {
                 const s = v.n.toFixed(it.d == null ? 2 : it.d);
                 return { text: (/^-0(\.0+)?$/.test(s) ? s.slice(1) : s) + (v.u ? ' ' + v.u : '') };       // no "-0.00"
@@ -389,7 +395,7 @@ mgu.run({
         }
         /** what a signal shows: { text, dim } */
         function sigText(it) {
-            const v = sigValue(it);
+            const v = shownTemp(sigValue(it));
             if (!v) return { text: sigSubs || sigDemo() ? 'no data' : '...', dim: true };
             if (v.bad) return { text: 'no data', dim: true };
             if (v.text !== undefined) return { text: v.text, dim: !!v.dim };
@@ -577,23 +583,23 @@ mgu.run({
         /** a value's number for a gauge: { n, u, d } or null (nothing now, or not a number) */
         function itemNum(x) {
             if (x.isSig) {
-                const v = x.sig && sigValue(x.sig);
+                const v = x.sig && shownTemp(sigValue(x.sig));
                 return v && typeof v.n === 'number' && !v.raw && !v.bad ? { n: v.n, u: v.u || '', d: x.sig.d == null ? 1 : x.sig.d } : null;
             }
             if (!x.unit) return null;
             if (x.useful) {
-                const v = usefulRaw(x.unit, x.useful);
+                const v = shownTemp(usefulRaw(x.unit, x.useful));
                 return typeof v.n === 'number' ? { n: v.n, u: v.u || '', d: x.useful.item.d == null ? 2 : x.useful.item.d } : null;
             }
             const vals = x.row && state(x.unit.res[x.row.key]) === 'ok' ? valuesOf(x.unit, x.row) : null, y = vals && vals[x.row.field];
-            return y && !y.why && typeof y.value === 'number' ? { n: y.value, u: x.row.e.f[x.row.field].u || '', d: Number.isInteger(y.value) ? 0 : 2 } : null;
+            return y && !y.why && typeof y.value === 'number' ? shownTemp({ n: y.value, u: x.row.e.f[x.row.field].u || '', d: Number.isInteger(y.value) ? 0 : 2 }) : null;
         }
         /** a catalog / standard value's text: { text, dim, warn } */
         function baseValue(u, row) {
             const r = u.res[row.key], s = state(r);
             if (s === 'ok') {
                 const v = valuesOf(u, row), x = v && v[row.field];
-                return { text: v ? ascii(format(x, row.e.f[row.field])) : '?', dim: !!(x && x.why) };
+                return { text: v ? ascii(formatShown(x, row.e.f[row.field])) : '?', dim: !!(x && x.why) };
             }
             if (!obdSupported(u, row)) return { text: u.obd ? 'not supported' : '...', dim: true };
             if (s === 'absent') return { text: 'not in this unit', dim: true };
@@ -665,7 +671,7 @@ mgu.run({
             if (!slot) return { empty: true };
             const x = item(slot.k, slot.fav), v = itemText(x), num = itemNum(x);
             const useful = x.useful ? x.useful.item.name : slot.fav.useful || null;
-            const s = { name: ascii(itemName(x)), text: ascii(v.text), dim: !!v.dim, warn: !!v.warn, n: null, u: ascii(slot.fav.u || ''), d: 0 };
+            const s = { name: ascii(itemName(x)), text: ascii(v.text), dim: !!v.dim, warn: !!v.warn, n: null, u: ascii(shownUnit(slot.fav.u || '')), d: 0 };
             if (!num) { s.sc = SCR.scale(slot.k, useful, s.u, ranges.get(slot.k) || null); return s; }
             const now = Date.now(), n = num.n;
             let r = ranges.get(slot.k), p = peaks.get(slot.k), tr = traces.get(slot.k);
@@ -1242,9 +1248,11 @@ mgu.run({
 
         /** Trips: page 1 this trip (or the last) and the last 5, page 2 the totals and the fuel price */
         const f1 = (x) => (x === null || x === undefined ? '--' : x.toFixed(1)), f2 = (x) => (x === null || x === undefined ? '--' : x.toFixed(2));
-        function titleButtons(cv, t, title, list) {
+        /** buttons right of a panel's title; y: the panel's top (each panel's own row, not the first one's) */
+        function titleButtons(cv, t, title, list, y) {
             let bx = 42 + cv.textWidth(title, 26, { font: 'bold' }) + 28;
-            list.forEach((b) => { bx += G.button(cv, t, bx, 62, 0, 38, b.label, b.run, b) + 12; });
+            const by = (y === undefined ? 52 : y) + 10;
+            list.forEach((b) => { bx += G.button(cv, t, bx, by, 0, 38, b.label, b.run, b) + 12; });
         }
         function drawTrips(cv, t, pg) {
             const now = Date.now(), cur = tc.cur, last = tc.trips[tc.trips.length - 1], tr = cur || last, cu = currency();
@@ -1303,7 +1311,7 @@ mgu.run({
             G.table(cv, t, 48, 108, 1504, [{ label: '', w: 470 }, { label: 'Trips', w: 130, align: 'right' }, { label: 'Distance', w: 220, align: 'right' },
                 { label: 'Fuel', w: 200, align: 'right' }, { label: 'l/100 km', w: 200, align: 'right' }, { label: 'Cost', w: 284, align: 'right' }], rows, { rowH: 36, size: 24 });
             G.panel(cv, t, 24, 364, 1552, 148, 'Fuel price');
-            titleButtons(cv, t, 'Fuel price', [{ label: 'Change', run: openPrice, key: 'price' }]);
+            titleButtons(cv, t, 'Fuel price', [{ label: 'Change', run: openPrice, key: 'price' }], 364);
             G.readout(cv, t, 48, 414, { text: tc.price ? tc.price.toFixed(2) : 'not set', unit: tc.price ? cu + ' a litre' : '', size: 56 });
             const tx = 560;
             cv.text((cv.own ? 'Change it with the knob or the buttons.' : 'The Fuel price button, then the knob.') + ' This trip, and trips that had no price, follow it; the others keep theirs.', tx, 426, 20, t.dim);
@@ -1467,7 +1475,11 @@ mgu.run({
         });
         if (ui.onFocus) ui.onFocus((name, on) => { if (name === 'MAIN' && on) redraw(); });
         if (ui.isVisible('MAIN')) maybeAuto();
-        settings.onChange(() => relayout());
+        settings.onChange((key) => {
+            // the ranges, peaks and traces so far are in the unit shown before
+            if (key === 'tempUnit') { ranges.clear(); peaks.clear(); traces.clear(); }
+            relayout();
+        });
         buttons();
         render(true).then(() => log.info('first frame done')).catch((e) => log.warn('first render: ' + e));
     },

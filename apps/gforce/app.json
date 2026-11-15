@@ -2,10 +2,12 @@
   "id": "gforce",
   "title": "G-Force",
   "description": "Friction circle with grip envelope, peak g per direction and session records",
-  "version": "1.6.20",
+  "version": "1.6.21",
   "vendor": "custom",
   "loggingId": "OA9B",
   "iconGlyph": "gforce",
+  "mguHmi": ["ID7", "ID8"],
+  "requires": { "idrive7-renderd": "2.1.15" },
   "signals": {
     "de.bmw.infotainment.vehicle.CDS2": {
       "statusLongitudinalAccelerationMassCenter": "rs",

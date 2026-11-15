@@ -2,10 +2,12 @@
   "id": "warmup",
   "title": "Warm-Up",
   "description": "Oil and coolant warm-up calculator (time to ready), safe rev limit and turbo cool-down",
-  "version": "1.7.3",
+  "version": "1.8.1",
   "vendor": "custom",
   "loggingId": "OA9A",
   "iconGlyph": "temp",
+  "mguHmi": ["ID7", "ID8"],
+  "requires": { "idrive7-renderd": "2.1.15" },
   "signals": {
     "de.bmw.infotainment.vehicle.CDS": {
       "statusEngineSpeed2": "rs",
@@ -17,6 +19,15 @@
     },
     "de.bmw.infotainment.drivingexcitement.FES": {
       "statusActualValueTorque2": "rs"
+    },
+    "de.bmw.infrastructure.analytics.BasicDataSet": {
+      "_optional": "gearbox oil temperature (when the gearbox unit has none)",
+      "basicDataSet": "s"
+    },
+    "com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu": {
+      "_instances": "SystemFunctionsInternalTasuInst1",
+      "_methods": ["sendTasuRequest"],
+      "_broadcasts": ["sendTasuResponse"]
     }
   },
   "screens": [
@@ -38,6 +49,8 @@
       "label": "Oil is warm at",
       "type": "number",
       "unit": "°C",
+      "unitBy": "tempUnit",
+      "units": { "f": { "unit": "°F", "mul": 1.8, "add": 32 } },
       "default": 80,
       "steps": [
         60,
@@ -54,6 +67,8 @@
       "label": "Coolant is warm at",
       "type": "number",
       "unit": "°C",
+      "unitBy": "tempUnit",
+      "units": { "f": { "unit": "°F", "mul": 1.8, "add": 32 } },
       "default": 80,
       "steps": [
         60,
@@ -63,6 +78,16 @@
         85,
         90
       ]
+    },
+    {
+      "key": "warmGearbox",
+      "label": "Gearbox oil is warm at",
+      "type": "number",
+      "unit": "°C",
+      "unitBy": "tempUnit",
+      "units": { "f": { "unit": "°F", "mul": 1.8, "add": 32 } },
+      "default": 60,
+      "steps": [40, 50, 60, 70, 80]
     },
     {
       "key": "engine",

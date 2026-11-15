@@ -152,6 +152,7 @@ the template is made by the install (`postInstall`, needs mgu-deploy 0.6.1).
 | `idrive7-renderd` installed through the Store | `renderd --persist` removes it through the Store's own deploy tool (the Store then shows it removed), then installs its own |
 | the installer's renderer, then `idrive7-renderd` from the Store | the Store takes it over (removes the installer's unit and program); the installer's template unit stands down |
 | mgu-store's own **mgu-render** beside ours, in either order | both run, each fully: this kit's apps draw on ours (`/run/mgu-renderd/renderd.sock` first), the Store's own apps on mgu-render. Each has its own touch divert (ours: table `ip idrive7_render`, ports 30572/30573; mgu-render: `ip mgu_render`, 30570/30571) and its own ivi ids (ours `0x4d470000`/`0x4d470100`, as the first renderer; mgu-render `0x4d520000`/`0x4d520100`). The page template is mgu-render's while it is installed |
+| IterioDev's renderer (his App Manager's service package, or the Store's `mgu-renderd` tool) | the two cannot run together (the same community socket and ivi ids): ours stands down while his is installed or running (it logs why once and looks again every 30 s), and all the apps draw on his. The kit installer refuses to overwrite his `mgu-renderd.service` (same name); the Store package's install step leaves it alone |
 | our renderer from the Store (2.1.x) | every app in the Store requires it, so it comes with the apps; its install step removes the installer's renderer it replaces |
 
 ### In-page drawing: the page template
@@ -261,7 +262,8 @@ crashing, the renderer stopping, a clock jump backwards) opens it.
 sh mgu-app-install.sh inputgate             # copy next to the renderer + boot guard: loads at the next head-unit start
 sh mgu-app-install.sh inputgate --now       # VM / bench only: restart the HMI with it now (on a car that reboots the unit)
 sh mgu-app-install.sh inputgate-status      # loaded / set up / left out by the boot guard
-sh mgu-app-install.sh inputgate-remove      # take it out (the HMI drops it at the next start; --now: restart it)
+sh mgu-app-install.sh inputgate-remove      # take it out: gone after a head-unit reboot (systemctl reboot or hold the
+                                            # volume knob; an ignition cycle is not one); --reboot: reboot now; --now: restart the HMI (VM)
 ```
 
 The HMI is never restarted on a car: `hmi.service` stops with SIGABRT and the head unit's crash

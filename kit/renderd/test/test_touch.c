@@ -70,9 +70,11 @@ int main(void)
     snprintf(path, sizeof path, "%s:%s", dir, getenv("PATH") ? getenv("PATH") : "/usr/bin:/bin");
     setenv("PATH", path, 1);
 
-    /* the car's rule and firewall line: our ports, the display's address */
+    /* the car's rule and firewall line: our ports, the display's address; and what the other renderers hand on to
+     * the HMI over lo (the Store's keeps its rule in for an overlay: issue #152), not our own (no loop) */
     CHECK(touch_rules("vlan73", "160.48.199.115") == 0 &&
-          !strcmp(rule, "iifname \"vlan73\" ip saddr 160.48.199.115 udp dport 30567 notrack udp dport set 30572") &&
+          !strcmp(rule, "iifname \"vlan73\" ip saddr 160.48.199.115 udp dport 30567 notrack udp dport set 30572\n"
+                  "iifname \"lo\" udp sport { 30569, 30571 } udp dport 30567 notrack udp dport set 30572") &&
           strstr(open_fw, "nft insert rule ip filter input iifname vlan73 ip saddr 160.48.199.115 udp dport 30572 accept"),
           "car rule: %s / %s", rule, open_fw);
 
@@ -84,6 +86,8 @@ int main(void)
     CHECK(outs() == 1 && loads() == 0, "start: a leftover of ours is not removed");
     touch_tick(1);
     CHECK(loads() == 1 && strstr(slurp(), "udp dport set 30572"), "claimed: rule not in");
+    /* after the other renderers' -300: their overlays (drawn over our apps) see a touch first (issue #152) */
+    CHECK(strstr(slurp(), "priority -299;") != NULL, "rule not after the other renderers': %s", slurp());
     touch_tick(1);
     CHECK(loads() == 1, "claimed twice: loaded twice");
     touch_tick(0);

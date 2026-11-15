@@ -1,5 +1,37 @@
 # mgu-render changelog
 
+## idrive7-apps mgu-renderd 2.1.18
+
+- The controller gate on iDrive 8 (to try, issue #152): whether the gate is loaded is now looked up in Hmi8 too (iDrive 8's HMI; HmiMain3D on iDrive 7), so apps there are offered the controller once `mgu-inputgate.so` runs in it. The HMI's surface is still looked up by `hmi_process` only (unchanged layout on iDrive 8).
+- `mgu-app-install.sh inputgate` sets the gate up for `hmi8.service` / `Hmi8` on iDrive 8 (same boot guard: two starts without the HMI coming up healthy with it and it is left out), and takes the Store's renderer (`idrive7-renderd`) as the renderer it needs. iDrive 7 gets the same files as before.
+
+## idrive7-apps mgu-renderd 2.1.17
+
+- Beside IterioDev's renderer (his App Manager's service package, or the Store's `mgu-renderd` tool): it binds the same community socket and uses the same ivi ids, so the two cannot run together. While it is installed (its `mgu-renderd.service`, started with `--socket`) or a `mgu-renderd --socket` runs, this renderer stands down: it says so once, sets up nothing (socket, touch divert, layers) and looks again every 30 s; once it is gone it starts. Its apps and ours then draw on IterioDev's renderer.
+- The kit installer (`mgu-app-install.sh renderd`) no longer overwrites a `mgu-renderd.service` that is not its own (IterioDev's has the same name), and the Store package's install step removes only the kit installer's unit (its marker line), never IterioDev's.
+
+## idrive7-apps mgu-renderd 2.1.16
+
+- Up to 64 apps connected at once (was 16). While this renderer has the community socket, IterioDev's apps connect to it as well as ours; with both sets installed on an iDrive 8 car the 16 slots filled and the later apps (ours among them) drew in the HMI's text screen (issue #152). A slot costs only while its app is connected, and pictures stay under the all-apps limit as before.
+
+## idrive7-apps mgu-renderd 2.1.15
+
+- iDrive 8 from the Store: the Store package is for iDrive 7 and iDrive 8 (component.json `mguHmi`). Its unit no longer passes iDrive 7's touch area (`touch_area=84,0,1836,720`): the renderer's built-in default for a 1920 x 720 screen is now that area (right of the back column, the title strip included, for the kit's page tabs), and a 2880 x 960 screen gets iDrive 8's app area. Same for `mgu-app-install.sh renderd`, which no longer looks for Hmi8 to leave it out. The page template step already does nothing on iDrive 8 (no HmiMain3D).
+
+## idrive7-apps mgu-renderd 2.1.14
+
+- Touch beside the MGU Store's renderer: our divert runs after the other renderers' (nft priority -299, theirs -300), so with both in, theirs sees a touch first. The Store's overlays are drawn over our apps: a tap on one is its own, and what it doesn't want comes on to us over lo. At the same priority the order was the tables', and once IterioDev's overlays were on, a tap could close our app as "the HMI was touched" (iDrive 8 car, issue #152).
+- A touch handed to the HMI is logged with where it was and where it came from (the display, the Store's renderer, IterioDev's).
+
+## idrive7-apps mgu-renderd 2.1.13
+
+- Touch beside the MGU Store's renderer: the divert also takes the touches the Store's renderer (from port 30571) and IterioDev's (30569) hand on to the HMI over lo. The Store's renderer keeps its divert in all the time while an overlay of its claims (IterioDev's overlays), sees every touch first and passes the ones outside its claims to the HMI past our rule: on an iDrive 8 car our apps got no touch at all, and the taps reached the HMI under them (issue #152). Ours (30573) are not taken back: nothing loops.
+
+## idrive7-apps mgu-renderd 2.1.12
+
+- Layers: an app's layer goes on the centre screen through a connection made for it and closed again (as mgu-render's `src/relist.c`), not through the renderer's own. Winston applies a screen's `add_layer` to the layer list as the calling connection last saw it, so through the long-open connection every layer another program had put on the screen since the renderer started was taken off whenever an app was shown again. Seen on a car: a movie player's own layer flashed off on each BACK of its app (59 times in 34 BACKs; 0 in 8 with this change).
+- Layers: an app's layer goes on top of the screen when it is first shown and before it is made visible (it could show under another program's layer for a frame); should that fail, it goes on through the renderer's own connection, as before (the app shows; other programs' layers may go).
+
 ## idrive7-apps mgu-renderd 2.1.11
 
 - Foreground gate: a uuid that an earlier install's left-behind folder still claims goes to the install the app manager has registered (its registry, `oap_12201/data/apps`). Such an app drew in the HMI's own picture on every open, whichever the Renderer setting.
