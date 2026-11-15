@@ -240,3 +240,63 @@ Data's Read all does. This lets a known monitor be retried after unrelated
 telemetry misses; it sends no wakeup/session/reset command to the ECU. Requests
 remain serialized, bounded by the selected deadline, and separated by the scan
 interval. A scan that again loses replies still hits the normal five-miss pause.
+
+
+### Copying misfire reports without SSH (0.2.1)
+
+While stationary, open **Misfire Debugger → Export / USB**. Insert a USB stick
+into the car, press **Refresh USB**, select the intended drive using **Next USB
+drive** if necessary, then press **Copy JSON to USB**. Wait for the success
+message and for drive activity to finish before removing the stick.
+
+On your computer, open the **S58-Overview** folder on the stick and attach the
+`misfire-export-<timestamp>.json` file. The JSON includes the complete captured
+request/response records and telemetry, just like the local export. Existing
+reports are never overwritten. **Save locally only** still writes JSON and CSV
+inside the head unit; it does not copy anything to USB.
+
+For the native controls, choose **Open export / USB**, **Refresh USB drives**,
+**Next USB drive**, or **Copy JSON to selected USB** in Settings → Misfire action,
+then press **Run misfire action**.
+
+Only volumes currently mounted under `/media/<label>` or
+`/run/media/<user>/<label>` are offered. Detection, read-only and permission
+errors appear on screen; no successful USB copy is claimed on failure. This
+has synthetic filesystem and emulator coverage, but write permissions and USB
+mounting still need verification on the actual head unit. No SSH or network
+connection is involved. QR transfer is not part of this version.
+
+
+### Ignition & Knock tab (0.3.0)
+
+The normal tabs are **Overview**, **Ignition & Knock**, and **Diagnostics**.
+**Settings → Show misfire debugger** is off by default and reveals the advanced
+Misfire Debugger tab, its native actions and settings when enabled. Disabling
+it stops its active scan. The Ignition tab still offers a stationary manual raw
+monitor update and the USB report export page.
+
+The six cylinder correction bars and ignition timing fields deliberately show
+`--` in live mode: exact cylinder mappings have not been verified for S58 ROM
+00005C64146E06. Mean retard DID 554C remains a candidate and is not expanded into
+six invented readings. Raw Mode 06 values stay labelled unverified; there is no
+confirmed misfire total. Demo mode shows the supplied example corrections,
+illustrative timing values and a simulated RPM/boost heatmap.
+
+Run statistics only accept complete, explicitly verified six-cylinder samples;
+they track the worst correction and the latest correction's RPM, boost and lambda.
+The heatmap and RPM-band frequency represent the percentage of valid samples with
+any negative correction, not counts of distinct knock events. Empty bins remain
+empty. Repeated sample timestamps do not inflate statistics. Reset run and a
+change between demo/live clear the run statistics. They have no live data until
+the individual cylinder mappings are validated.
+
+Boost is now read between other diagnostic requests, with at most one other
+reading per pass and 25 ms between passes instead of a whole sweep plus 500 ms.
+Ageing working readings take priority over unsupported probes; slower temperature,
+ambient, target and ethanol values refresh on a 2 s cadence. Last working
+identifiers are restored after an ECU timeout pause. The Overview shows the
+boost sample age. Reads remain serialized and subject to the existing timeouts,
+backoff and read-only restrictions. A slow individual ECU reply or an explicitly
+requested raw monitor scan can still delay polling; car responsiveness must be
+validated on the head unit. Synthetic 178 ms reply tests keep healthy boost reads
+within 500 ms; this is not a measured vehicle guarantee.

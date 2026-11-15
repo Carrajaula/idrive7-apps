@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { hex, NRC } = require('./kit/diag');
 const G = require('./kit/gauges');
+const USB = require('./usb-export');
 const byte = (b) => Number.isInteger(b) && b >= 0 && b <= 255;
 const num = (v) => typeof v === 'number' && isFinite(v);
 const iso = (t) => new Date(t).toISOString();
@@ -91,6 +92,7 @@ class Debugger {
         this.session = iso(Date.now()).replace(/[:.]/g, '-');
         this.captureFile = this.dataDir ? path.join(this.dataDir, 'misfire-' + this.session + '.jsonl') : null;
         this.writeChain = Promise.resolve(); this.lastTelemetry = null;
+        this.exportOpen = false; this.usbDrives = []; this.usbIndex = 0; this.usbBusy = false; this.usbSaved = null;
     }
     getSetting(k, fallback) { const v = this.settings.get(k); return v == null ? fallback : v; }
     timeout() { return Math.max(1, Math.min(10, Number(this.getSetting('misfireTimeout', 4)) || 4)) * 1000; }
@@ -124,8 +126,13 @@ class Debugger {
         if (name === 'refresh') return this.refresh(this.inspector ? this.selectedMid : undefined);
         if (name === 'monitor') return this.monitoring ? this.stop() : this.start();
         if (name === 'baseline') return this.resetBaseline();
-        if (name === 'export') return this.export();
+        if (name === 'export') return this.showExport();
+        if (name === 'exportlocal') return this.export();
+        if (name === 'exportusb') return this.exportUsb();
         if (!this.stationary()) { this.message = 'Detailed inspection requires a stationary vehicle'; return false; }
+        if (name === 'usbrefresh') return this.showExport();
+        if (name === 'usbnext') { if (!this.usbBusy) this.usbIndex = (this.usbIndex + 1) % Math.max(1, this.usbDrives.length); return true; }
+        if (name === 'closeexport') { this.exportOpen = false; return true; }
         if (name === 'inspector') { this.inspector = !this.inspector; this.page = 0; }
         else if (name === 'nextmid') { this.selectedMid = MIDS[(MIDS.indexOf(this.selectedMid) + 1) % MIDS.length]; this.page = 0; }
         else if (name === 'nexttid') {
@@ -219,6 +226,33 @@ class Debugger {
         return { rawSum: valid ? rows.reduce((s, r) => s + r.parsed.selected.rawValue, 0) : null, misfireCount: null, interpretationVerified: false };
     }
     flush() { return this.writeChain; }
+    showExport() {
+        if (!this.stationary()) { this.message = 'USB export requires a stationary vehicle and valid speed'; return false; }
+        if (this.usbBusy) return false;
+        this.exportOpen = true; this.usbIndex = 0; this.exportReturnLabel='Back to debugger';
+        try {
+            this.usbDrives = USB.drives();
+            this.message = this.usbDrives.length ? 'Choose a drive, then Copy JSON to USB.' : 'No USB drive detected. Insert a USB stick, wait, then Refresh USB.';
+        } catch (e) { this.usbDrives = []; this.message = 'Cannot detect USB drives: ' + (e.code || e.message); }
+        return true;
+    }
+    async exportUsb() {
+        if (!this.stationary()) throw new Error('USB export requires a stationary vehicle and valid speed');
+        if (this.usbBusy || this.exporting) throw new Error('Export already running');
+        const drive = this.usbDrives[this.usbIndex];
+        if (!drive) throw new Error('No USB drive selected. Open Export options and Refresh USB.');
+        this.usbBusy = true; this.usbSaved = null;
+        try {
+            const files = await this.export();
+            this.usbSaved = USB.copy(files.json, drive.mount);
+            this.message = 'USB JSON saved. Wait for USB activity to finish before removing the drive.';
+            return this.usbSaved;
+        } catch (e) {
+            e.message = 'USB export failed: ' + (e.code || '') + ' ' + e.message;
+            this.message = e.message;
+            throw e;
+        } finally { this.usbBusy = false; }
+    }
     async export() {
         if (!this.stationary()) throw new Error('Export requires stationary vehicle and valid speed');
         if (!this.dataDir) throw new Error('No writable app data directory');
@@ -274,7 +308,7 @@ function inspectorLines(d) {
 }
 
 function draw(cv, t, d, back) {
-    cv.text('S58 OVERVIEW / DIAGNOSTICS / MISFIRE DEBUGGER', 24, 64, 22, t.text, { font: 'bold' });
+    cv.text(d.exportOpen?'S58 OVERVIEW / EXPORT REPORT':'S58 OVERVIEW / DIAGNOSTICS / MISFIRE DEBUGGER', 24, 64, 22, t.text, { font: 'bold' });
     const preference = d.getSetting('misfireProtocol', 'auto');
     const active = preference === 'auto' ? 'Auto -> ' + (d.mode || 'not detected') : preference;
     cv.text('TASU ' + (d.link.available ? 'available' : 'disconnected') + ' | DME 0x12 | ' + active + ' | ' + (d.monitoring ? 'MONITORING' : 'stopped')
@@ -284,6 +318,26 @@ function draw(cv, t, d, back) {
         catch (e) { d.message = String(e.message || e); return null; }
     }, { busy: !!disabled, key: 'mf-' + label });
     const parked = d.stationary();
+    if (d.exportOpen) {
+        cv.text('EXPORT MISFIRE REPORT TO USB', 36, 154, 30, t.text, { font: 'bold' });
+        cv.text('1. Insert a USB stick into the car.  2. Refresh USB.  3. Copy JSON to USB.', 36, 195, 22, t.text);
+        cv.text('On your computer, open S58-Overview on the USB drive and attach the .json file here.', 36, 230, 21, t.dim);
+        const drive = d.usbDrives[d.usbIndex], busy = d.usbBusy || d.exporting;
+        cv.text('Selected drive: ' + (drive ? (d.usbIndex + 1) + '/' + d.usbDrives.length + '  ' + drive.mount + (drive.writable ? '' : ' (READ ONLY)') : 'none'), 36, 282, 22, t.text);
+        cv.text(d.usbSaved ? 'Saved JSON:' : 'Report includes all captured requests, raw replies and telemetry.', 36, 324, 21, t.dim);
+        if (d.usbSaved) {
+            for (let i = 0; i < d.usbSaved.length; i += 100) cv.text(d.usbSaved.slice(i, i + 100), 36, 356 + i / 100 * 27, 20, t.text);
+        }
+        if (!parked) cv.text('Park the car to export.', 36, 414, 22, t.warn);
+        button(24, 250, 'Copy JSON to USB', () => d.exportUsb(), !parked || busy || !drive || !drive.writable);
+        button(286, 230, 'Refresh USB', () => d.showExport(), !parked || busy);
+        button(528, 210, 'Next USB drive', () => d.action('usbnext'), !parked || busy || d.usbDrives.length < 2);
+        button(750, 260, 'Save locally only', () => d.export(), !parked || busy);
+        button(1022, 240, d.exportReturnLabel || 'Back to debugger', () => { d.exportOpen = false; }, busy);
+        button(1274, 302, 'Back to diagnostics', back, busy);
+        cv.text(String(d.message).slice(0, 155), 24, 450, 17, t.warn);
+        return;
+    }
     if (d.inspector) {
         if (!parked) {
             cv.text('Raw inspection is for stationary use. Park with a valid speed signal.', 36, 180, 26, t.warn);
@@ -322,7 +376,7 @@ function draw(cv, t, d, back) {
         button(24, 228, 'Refresh / Retry', () => d.refresh(), !parked || d.busy);
         button(264, 228, d.monitoring ? 'Stop monitoring' : 'Start monitoring', () => d.monitoring ? d.stop() : d.start(), !d.monitoring && !parked);
         button(504, 268, 'Reset local baseline', () => d.resetBaseline(), !parked);
-        button(784, 250, 'Export JSON / CSV', () => d.export(), !parked || d.exporting);
+        button(784, 250, 'Export / USB', () => d.showExport(), !parked || d.exporting);
         button(1046, 220, 'Inspector', () => { d.inspector = true; d.page = 0; }, !parked);
         button(1278, 298, 'Back to diagnostics', back);
     }

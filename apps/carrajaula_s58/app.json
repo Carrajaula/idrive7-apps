@@ -2,7 +2,7 @@
   "id": "carrajaula_s58",
   "title": "S58 Overview",
   "description": "Read-only S58 dashboard with boost, WGDC, AFR, rail pressure, average knock retard, temperatures and MHD Active ethanol.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "vendor": "Carrajaula",
   "loggingId": "OCS1",
   "iconGlyph": "gauge",
@@ -42,6 +42,14 @@
           "Diagnostics / Overview"
         ],
         [
+          "BTN_IGNITION",
+          "Ignition & Knock / Overview"
+        ],
+        [
+          "BTN_REPORT",
+          "Export report / USB"
+        ],
+        [
           "BTN_MISFIRE",
           "Misfire Debugger"
         ],
@@ -69,6 +77,12 @@
     }
   ],
   "settings": [
+    {
+      "key": "showDebugger",
+      "label": "Show misfire debugger",
+      "type": "bool",
+      "default": false
+    },
     {
       "key": "boostMax",
       "label": "Boost scale",
@@ -179,7 +193,10 @@
           "uds",
           "UDS F6 (unverified layout)"
         ]
-      ]
+      ],
+      "when": {
+        "showDebugger": true
+      }
     },
     {
       "key": "misfireTimeout",
@@ -196,7 +213,10 @@
         6,
         8,
         10
-      ]
+      ],
+      "when": {
+        "showDebugger": true
+      }
     },
     {
       "key": "misfireInterval",
@@ -211,7 +231,10 @@
         30,
         60,
         120
-      ]
+      ],
+      "when": {
+        "showDebugger": true
+      }
     },
     {
       "key": "misfireAction",
@@ -233,7 +256,27 @@
         ],
         [
           "export",
-          "Export JSON / CSV"
+          "Open export / USB"
+        ],
+        [
+          "exportusb",
+          "Copy JSON to selected USB"
+        ],
+        [
+          "usbrefresh",
+          "Refresh USB drives"
+        ],
+        [
+          "usbnext",
+          "Next USB drive"
+        ],
+        [
+          "exportlocal",
+          "Save JSON / CSV locally"
+        ],
+        [
+          "closeexport",
+          "Back from export"
         ],
         [
           "inspector",
@@ -259,7 +302,10 @@
           "back",
           "Back to diagnostics"
         ]
-      ]
+      ],
+      "when": {
+        "showDebugger": true
+      }
     }
   ],
   "config": {

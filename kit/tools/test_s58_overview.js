@@ -13,9 +13,11 @@ const realGauges = require(path.join(ROOT, 'kit/runtime/gauges'));
 const themes = require(path.join(ROOT, 'kit/runtime/themes'));
 const num = (x) => typeof x === 'number' && isFinite(x);
 const originalNow = Date.now, originalTimeout = global.setTimeout, originalLoad = Module._load;
-let now = 100000, app, frame, timer, reset, lastCanvas;
+let now = 100000, app, frame, timer, reset, lastCanvas, tab, changed;
+const visibility = {};
 const reads = [], gauges = [], texts = [], modes = { demo: 'off', boostMax: 3 };
-let visible = true, fail = false, missingAmbient = false, transportDown = false, activeLink, slowMissing = false;
+let visible = true, fail = false, missingAmbient = false, transportDown = false, activeLink, slowMissing = false, replyMs = 0;
+const boostReplies = [];
 const clicks = {};
 const raw = { '4205': 38400, '4201': 25600, '4AB0': 51200, '4AAB': 49152,
     '5889': 4096, '58F3': 5500, '58EF': 60000, '554C': 248, '580F': 96, '59D4': 13610, '6000': 112 };
@@ -27,6 +29,7 @@ class Link {
     wake(ecu) { ReadOnlyDiag.prototype.wake.call(this, ecu); }
     silent(ecu) { return ReadOnlyDiag.prototype.silent.call(this, ecu); }
     async physical(ecu, sid, data) {
+        now += replyMs;
         check(ecu, sid, data, false); // the real read-only trust-boundary validation
         if (this.silent(ecu)) return null;
         this.stats.sent++;
@@ -34,7 +37,7 @@ class Link {
         this.misses[ecu] = 0;
         if (sid === 0x2C) { if (monitorReply instanceof Error) throw monitorReply; reads.push('MHD 2C 88 01'); return fail ? [0x7F, 0x2C, 0x31] : monitorReply; }
         const did = sid === 0x22 ? Buffer.from(data).toString('hex').toUpperCase() : 'OBD ' + data[0];
-        reads.push(did);
+        reads.push(did); if(did==='4205')boostReplies.push(now);
         if (fail || (missingAmbient && (did === '4201' || did === 'F433' || did === 'OBD 51'))) return [0x7F, sid, 0x31];
         if (slowMissing && raw[did] === undefined) now += 1500;
         if (raw[did] === undefined) return [0x7F, sid, 0x31];
@@ -55,18 +58,18 @@ Module._load = function (req, parent, isMain) {
     return originalLoad.call(this, req, parent, isMain);
 };
 Date.now = () => now;
-global.setTimeout = (fn) => { timer = fn; return 0; };
-const tick = async () => { for (let i = 0; i < 16; i++) await timer(); };
+global.setTimeout = (fn, ms) => { timer = async () => { now += ms || 0; return fn(); }; return 0; };
+const tick = async () => { for (let i = 0; i < 48; i++) await timer(); };
 const draw = async () => { gauges.length = texts.length = 0; await frame(); return gauges.map((g) => g.value); };
 
 (async () => {
     try {
         require(path.join(ROOT, 'apps/carrajaula_s58/main'));
-        await app.start({ spec: SPEC, settings: { get: (k) => modes[k], onChange() {} },
+        await app.start({ spec: SPEC, settings: { get: (k) => modes[k], onChange(fn) { changed=fn; } },
             signals: { watch(iface, instance, fields) { fields.statusEngineTemperature({ temperatureEngineOilDrive: 142, temperatureEngineDrive: 135 }); return Promise.resolve({}); } }, log: { info() {}, warn() {} }, theme: () => themes.theme('m_red'),
             canvas(w, h) { const cv = lastCanvas = new Recorder(w, h); cv.own = true; const text = cv.text.bind(cv); cv.text = (s, ...a) => { texts.push(s); return text(s, ...a); }; return cv; },
-            ui: { onVisible() {}, isVisible: (name) => name === 'MAIN' && visible, image() {}, onClick(k, f) { clicks[k] = f; if (k === 'BTN_RESET') reset = f; } },
-            onTab() {},
+            ui: { visible(k,v) {visibility[k]=v;}, onVisible() {}, isVisible: (name) => name === 'MAIN' && visible, image() {}, onClick(k, f) { clicks[k] = f; if (k === 'BTN_RESET') reset = f; } },
+            onTab(fn) { tab=fn; },
             loop(n, fps, fn) { frame = fn; },
         });
         await new Promise(setImmediate); await tick();
@@ -162,7 +165,7 @@ const draw = async () => { gauges.length = texts.length = 0; await frame(); retu
         assert(texts.includes('17 %'), 'monitor can be enabled again');
         const saved = Object.assign({}, raw);
         for (const did of ['4AAB', '5889', '58F3', '580F', '59D4']) delete raw[did];
-        slowMissing = true; now += 31000;
+        slowMissing = true; now += 31000; await tick(); // Let the per-read scheduler refill metadata after the artificial 31 s gap.
         for (let i = 0; i < 15; i++) {
             await timer();
             const liveGauges = await draw();
@@ -170,6 +173,20 @@ const draw = async () => { gauges.length = texts.length = 0; await frame(); retu
             assert.strictEqual(liveGauges[4], 300, 'fallback probes must not starve working rail');
         }
         slowMissing = false; Object.assign(raw, saved); now += 31000; await tick();
+        // The new tab is available without exposing or starting the debugger.
+        assert.equal(visibility.BTN_MISFIRE,false);
+        await clicks.BTN_MISFIRE(); await draw();assert(!texts.includes('S58 OVERVIEW / DIAGNOSTICS / MISFIRE DEBUGGER'));
+        await tab(1);await draw();assert(texts.includes('IGNITION & KNOCK MONITOR'));
+        assert(texts.some(s=>s.includes('not verified for ROM')));assert(!texts.includes('-3.0°'),'live tab must not invent cylinder corrections');
+        await tab(0);
+        // Under healthy reads boost is polled between other requests, without a 500 ms sweep pause.
+        const beforePriority=reads.length;await tick();const priority=reads.slice(beforePriority);
+        assert(priority.filter(x=>x==='4205').length>=20);
+        let sinceBoost=0;for(const k of priority){if(k==='4205')sinceBoost=0;else {sinceBoost++;assert(sinceBoost<=1,'at most one request between boost reads');}}
+        replyMs=178;const timingStart=boostReplies.length;await tick();replyMs=0;
+        const times=boostReplies.slice(timingStart);assert(times.length>20);
+        assert(times.slice(1).every((t,i)=>t-times[i]<=500),'healthy 178 ms replies must keep boost refresh within 500 ms in the simulated transport');
+        modes.showDebugger=true;changed('showDebugger');assert.equal(visibility.BTN_MISFIRE,true);
         // The debugger is idle until explicitly refreshed, then shares polling with the gauges.
         assert(!reads.includes('OBD 162') && !reads.includes('F6A2'));
         await clicks.BTN_MISFIRE(); await draw();
@@ -178,6 +195,7 @@ const draw = async () => { gauges.length = texts.length = 0; await frame(); retu
         assert(reads.includes('OBD 162') && reads.includes('F6A2'), 'Mode 06 detection and fallback use existing transport');
         await clicks.BTN_MISFIRE(); await clicks.BTN_DIAG();
         assert.strictEqual((await draw())[0],2,'debugger probing does not stop regular boost polling');
+        modes.showDebugger=false;changed('showDebugger');assert.equal(visibility.BTN_MISFIRE,false);
         visible = false;
         let count = reads.length; await tick();
         assert.strictEqual(reads.length, count, 'hidden screen does not poll');

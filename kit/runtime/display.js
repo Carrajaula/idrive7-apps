@@ -96,6 +96,7 @@ class Display {
         this.frames = 0; this.jsMs = 0; this.statT = Date.now();
         this.sheet = null;                           // sheet.js page drawn over the app's (openSheet)
         this.ccuLast = null;                         // last controller state (knob counter, press, push)
+        this.hiddenButtons = new Set();              // explicitly hidden in both HMI and renderer paths
         this.ownHidden = new Set();                  // more bar buttons left out where the kit runs the screen (hideButton)
         G.onConfirm(() => { this.lastWords = null; this.tickHandlers.forEach((fn) => fn()); });   // a reset asks / runs out
         const canvasScreens = (spec.screens || []).filter((s) => s.kind === 'canvas');
@@ -512,7 +513,7 @@ class Display {
         const hide = this.ownable() && !this.blocked;
         if (this.hmiBarHidden === hide) return;
         this.hmiBarHidden = hide;
-        (this.screen.buttons || []).forEach((b) => { if (this.ui.visible) this.ui.visible(b[0], !hide); });
+        (this.screen.buttons || []).forEach((b) => { if (this.ui.visible) this.ui.visible(b[0], !hide && !this.hiddenButtons.has(b[0])); });
     }
 
     layout() {
@@ -860,8 +861,13 @@ class Display {
         return this.ownable() && !this.buttons().length ? 0 : FULL.barH;
     }
     /** Leave bar button id out where the kit runs the screen (the app draws it on the page there). */
-    hideButton(id) {
-        this.ownHidden.add(id); this._btns = null;
+    hideButton(id, hidden = true, everywhere = false) {
+        if (hidden) this.ownHidden.add(id); else this.ownHidden.delete(id);
+        if (everywhere) {
+            if (hidden) this.hiddenButtons.add(id); else this.hiddenButtons.delete(id);
+            this.hmiBarHidden = null; this._hmiBar();
+        }
+        this._btns = null;
         if (this.place) this._place();
     }
     /** Header height: 0 for "chrome": false (the app draws the whole screen itself, e.g. a game). */
@@ -878,7 +884,7 @@ class Display {
         this._btnsOwn = own;
         const m = new Recorder(1, 1);
         let x = HMI.btn.x;
-        this._btns = (this.screen.buttons || []).filter((b) => !own || (PAGER.indexOf(b[0]) < 0 && b[0] !== 'BTN_SETTINGS' && !this.ownHidden.has(b[0]))).map((b) => {
+        this._btns = (this.screen.buttons || []).filter((b) => !this.hiddenButtons.has(b[0]) && (!own || (PAGER.indexOf(b[0]) < 0 && b[0] !== 'BTN_SETTINGS' && !this.ownHidden.has(b[0])))).map((b) => {
             const label = this.labels[b[0]] != null ? this.labels[b[0]] : String(b[1] || b[0]);
             const w = Math.round(m.textWidth(label, HMI.btn.size, { font: 'label' }) * HMI.btn.k) + HMI.btn.pad;
             const r = { id: b[0], label, x, w };

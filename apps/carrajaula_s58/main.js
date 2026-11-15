@@ -6,6 +6,8 @@ const Car = require('./kit/car');
 const { ReadOnlyDiag } = require('./kit/readonly-diag');
 const { DidReader } = require('./kit/dids');
 const Misfire = require('./misfire');
+const Ignition = require('./ignition');
+const Poll = require('./poll-plan');
 const { hex, NRC } = require('./kit/diag');
 
 const W = 1600, H = 520, STALE_MS = 10000, RETRY_MS = 30000;
@@ -30,12 +32,14 @@ mgu.run({
         const link = await new ReadOnlyDiag(ctx.signals, log).init();
         const cfg = ctx.spec.config, reader = new DidReader(link, { ecu: cfg.ecu });
         const live = {}, tried = {}, peaks = {}, diagnosticReads = {}, retryUnit = {}, attempts = {};
-        let probeNext = 0;
+        let pollCursor = 0; const due = {}, lastGood = {};
         const units = Array.from(new Set([cfg.ecu].concat(Object.keys(cfg.sources).reduce((a, k) =>
             a.concat(cfg.sources[k].map((c) => c.ecu == null ? cfg.ecu : c.ecu)), []))));
         const retrySeconds = (ecu) => Math.max(0, Math.ceil(((retryUnit[ecu] || Date.now() + RETRY_MS) - Date.now()) / 1000));
         let diagnosticPage = null, monitor = null;
-        let source = null, misfireOpen = false;
+        let source = null, misfireOpen = false, ignitionOpen = false;
+        const ignitionRun = new Ignition.Run();
+        const debuggerEnabled = () => settings.get('showDebugger') === true;
         const misfire = new Misfire.Debugger({ link, settings, log, dataDir: ctx.dataDir, telemetry: () => {
             const d = car.data(), v = values(), real = !demo() && !d.demo;
             const get = (n) => real && num(n) ? n : null;
@@ -77,17 +81,16 @@ mgu.run({
                         if (link.silent(ecu) && retryUnit[ecu] && Date.now() >= retryUnit[ecu]) {
                             link.wake(ecu); delete retryUnit[ecu];
                             Object.keys(tried).forEach((k) => {
-                                if (k === 'ethanolActive' ? ecu === 0x12 : cfg.sources[k].some((c) => (c.ecu == null ? cfg.ecu : c.ecu) === ecu)) { delete tried[k]; delete attempts[k]; }
+                                if (k === 'ethanolActive' ? ecu === 0x12 : cfg.sources[k].some((c) => (c.ecu == null ? cfg.ecu : c.ecu) === ecu)) { delete tried[k]; delete attempts[k]; delete due[k]; if(k!=='ethanolActive')reader.pick[k]=lastGood[k]||0; }
                             });
                         }
                     });
                     if (settings.get('mhdMonitor') === false) delete live.ethanolActive;
                     const keys = Object.keys(cfg.sources).concat(settings.get('mhdMonitor') === false ? [] : ['ethanolActive']).filter((k) =>
                         (k === 'ethanolActive' || cfg.sources[k].length) && Date.now() >= (tried[k] || 0));
-                    // Like Live Data: refresh working readings before one fallback probe, not a whole blocking sweep.
-                    const probes = keys.filter((k) => !live[k]);
-                    const work = keys.filter((k) => live[k]);
-                    if (probes.length) work.push(probes[probeNext++ % probes.length]);
+                    const planned = Poll.plan(keys, due, Date.now(), pollCursor, live);
+                    pollCursor = planned.cursor;
+                    const work = planned.work;
                     for (const k of work) {
                         if (demo() || !ui.isVisible('MAIN')) break;
                         let value, record;
@@ -100,7 +103,8 @@ mgu.run({
                             if (!num(value) && !record.why.startsWith('not sent:')) reader.pick[k] = (i + 1) % list.length;
                         }
                         units.forEach((ecu) => { if (link.silent(ecu) && !retryUnit[ecu]) retryUnit[ecu] = Date.now() + RETRY_MS; });
-                        if (num(value)) { live[k] = { value, at: Date.now() }; attempts[k] = 0; delete tried[k]; }
+                        due[k] = num(value) ? Date.now() + Poll.interval(k) : 0;
+                        if (num(value)) { if(k!=='ethanolActive')lastGood[k]=reader.pick[k]||0; live[k] = { value, at: Date.now() }; attempts[k] = 0; delete tried[k]; }
                         else {
                             delete live[k];
                             attempts[k] = (attempts[k] || 0) + 1;
@@ -110,12 +114,12 @@ mgu.run({
                         }
                     }
                 }
-                if (!demo() && ui.isVisible('MAIN')) {
+                if (!demo() && ui.isVisible('MAIN') && (debuggerEnabled() || ignitionOpen)) {
                     await misfire.step();
                     if (link.silent(cfg.ecu) && !retryUnit[cfg.ecu]) retryUnit[cfg.ecu] = Date.now() + RETRY_MS;
                 } else if (misfire.monitoring || misfire.jobs.length) misfire.stop('Capture stopped: screen hidden or demo selected');
             } catch (e) { log.warn('S58 readings: ' + e); }
-            setTimeout(poll, 500);
+            setTimeout(poll, 25);
         }
 
         function values() {
@@ -185,7 +189,7 @@ mgu.run({
                 }
                 cv.text(status.slice(0, 155), 28, y + 86, 18, status.startsWith('OK') ? t.dim : t.warn);
             });
-            G.button(cv, t, 1260, 52, 310, 38, 'Misfire Debugger', () => { misfireOpen = true; });
+            if (debuggerEnabled()) G.button(cv, t, 1260, 52, 310, 38, 'Misfire Debugger', () => { misfireOpen = true; });
             G.button(cv, t, 24, 465, 300, 40, 'Previous diagnostics', () => { diagnosticPage--; });
             G.button(cv, t, 340, 465, 300, 40, 'Next diagnostics', () => { diagnosticPage++; });
             cv.text('TX = request / RX = reply; all fallback candidates included', 680, 491, 18, t.dim);
@@ -193,9 +197,18 @@ mgu.run({
 
         function render() {
             const isDemo = demo();
-            if (source !== isDemo) { clearPeaks(); Object.keys(live).forEach((k) => delete live[k]); source = isDemo; if (isDemo) { Object.keys(diagnosticReads).forEach((k) => delete diagnosticReads[k]); monitor = null; } }
+            if (source !== isDemo) { clearPeaks(); Object.keys(live).forEach((k) => delete live[k]); source = isDemo; ignitionRun.reset(); if (isDemo) { Object.keys(diagnosticReads).forEach((k) => delete diagnosticReads[k]); monitor = null; } }
             const d = values(), t = ctx.theme(), cv = ctx.canvas(W, H).clear('#08090b');
-            G.frame(cv, t, ['Overview', 'Diagnostics', 'Misfire Debugger'], misfireOpen ? 2 : diagnosticPage !== null ? 1 : 0);
+            G.frame(cv, t, ['Overview', 'Ignition & Knock', 'Diagnostics'].concat(debuggerEnabled() ? ['Misfire Debugger'] : []), misfireOpen ? 3 : ignitionOpen ? 1 : diagnosticPage !== null ? 2 : 0);
+            if (ignitionOpen && misfire.exportOpen) { Misfire.draw(cv,t,misfire,()=>{misfire.exportOpen=false;ignitionOpen=false;diagnosticPage=0;}); return ui.image('MAIN_GFX',cv); }
+            if (ignitionOpen) {
+                const at=Math.floor(Date.now()/250)*250;
+                const sample=isDemo?{at,verified:true,rpm:1200+(at/1000%7)*800,boost:d.boost,lambda:d.afr/14.7,corrections:[0,-.8,0,-1.5,0,-3],timing:[10,9.2,10,8.5,10,7]}:null;
+                ignitionRun.add(sample);
+                Ignition.draw(cv,t,{sample,run:ignitionRun,demo:isDemo,misfire,mean:d.knock,
+                    refresh:()=>{if(!isDemo)misfire.refresh();},export:()=>{misfire.showExport();misfire.exportReturnLabel='Back to Ignition';},reset:()=>ignitionRun.reset()});
+                return ui.image('MAIN_GFX',cv);
+            }
             if (misfireOpen) { Misfire.draw(cv, t, misfire, () => { misfireOpen = false; diagnosticPage = 0; }); return ui.image('MAIN_GFX', cv); }
             if (diagnosticPage !== null) { drawDiagnostics(cv, t); return ui.image('MAIN_GFX', cv); }
             Object.keys(d).forEach((k) => {
@@ -205,7 +218,7 @@ mgu.run({
             });
             cv.text(isDemo ? 'DEMO - SIMULATED DATA' : 'S58 ENGINE OVERVIEW', 24, 65, 21, isDemo ? t.warn : t.dim, { font: 'bold', spacing: 1 });
             const paused = !isDemo && link.silent(cfg.ecu);
-            cv.text(paused ? 'DME paused - retry in ' + retrySeconds(cfg.ecu) + ' s' : 'PRESSURES IN BAR', 1576, 65, 18, paused ? t.warn : t.dim, { align: 'right' });
+            cv.text(paused ? 'DME paused - retry in ' + retrySeconds(cfg.ecu) + ' s' : isDemo ? 'PRESSURES IN BAR' : 'BOOST sample age ' + (live.boostAbs ? ((Date.now()-live.boostAbs.at)/1000).toFixed(1)+' s' : '--') + ' | bar', 1576, 65, 18, paused ? t.warn : t.dim, { align: 'right' });
 
             G.radial(cv, t, 190, 236, 172, { value: d.boost, min: 0, max: settings.get('boostMax'), decimals: 2,
                 ticks: 12, tickDecimals: 1, label: 'Boost', unit: 'bar', hot: false, color: '#ee293d', showPeak: false,
@@ -239,20 +252,30 @@ mgu.run({
             return ui.image('MAIN_GFX', cv);
         }
 
-        ui.onClick('BTN_DIAG', () => { misfireOpen = false; diagnosticPage = diagnosticPage === null ? 0 : null; return render(); });
+        ui.onClick('BTN_IGNITION', () => { misfireOpen=false; diagnosticPage=null; ignitionOpen=!ignitionOpen; return render(); });
+        ui.onClick('BTN_REPORT', () => { misfireOpen=false; ignitionOpen=true; diagnosticPage=null; misfire.showExport(); misfire.exportReturnLabel='Back to Ignition'; return render(); });
+        ui.onClick('BTN_DIAG', () => { ignitionOpen=false; misfireOpen = false; diagnosticPage = diagnosticPage === null ? 0 : null; return render(); });
         ui.onClick('BTN_DIAG_NEXT', () => { if (misfireOpen) { misfire.page++; return render(); } diagnosticPage = diagnosticPage === null ? 0 : diagnosticPage + 1; return render(); });
         ui.onClick('BTN_DIAG_PREV', () => { if (misfireOpen) { misfire.page--; return render(); } diagnosticPage = diagnosticPage === null ? 0 : diagnosticPage - 1; return render(); });
-        ui.onClick('BTN_MISFIRE', () => { misfireOpen = !misfireOpen; if (!misfireOpen) diagnosticPage = 0; return render(); });
+        ui.onClick('BTN_MISFIRE', () => { if(!debuggerEnabled())return render(); ignitionOpen=false; misfireOpen = !misfireOpen; if (!misfireOpen) diagnosticPage = 0; return render(); });
         ui.onClick('BTN_MF_ACTION', async () => {
+            if(!debuggerEnabled())return render(); ignitionOpen=false;
             if (!misfireOpen) { misfireOpen = true; misfire.message = 'Choose Misfire action in Settings; press Run misfire action'; }
             else if (settings.get('misfireAction') === 'back') { misfireOpen = false; diagnosticPage = 0; }
             else { try { await misfire.action(settings.get('misfireAction') || 'refresh'); } catch (e) { misfire.message = String(e.message || e); } }
             return render();
         });
-        ctx.onTab((i) => { misfireOpen = i === 2; diagnosticPage = i === 1 ? 0 : null; return render(); });
+        ctx.onTab((i) => { misfireOpen = i === 3 && debuggerEnabled(); ignitionOpen = i === 1; diagnosticPage = i === 2 ? 0 : null; return render(); });
+        const debuggerVisibility=()=>{
+            ['BTN_MISFIRE','BTN_MF_ACTION'].forEach(id=>{
+                if(ctx.display)ctx.display.hideButton(id,!debuggerEnabled(),true);
+                else if(ui.visible)ui.visible(id,debuggerEnabled());
+            });
+        };
+        debuggerVisibility();
         ui.onVisible((name, on) => { if (name === 'MAIN' && !on) misfire.stop('Capture stopped: app hidden'); });
         ui.onClick('BTN_RESET', () => { clearPeaks(); return render(); });
-        settings.onChange((key) => { if (/^misfire/.test(key) && key !== 'misfireAction') misfire.stop('Debugger settings changed; refresh or start monitoring'); clearPeaks(); link.wake(); Object.keys(retryUnit).forEach((k) => delete retryUnit[k]); Object.keys(tried).forEach((k) => delete tried[k]); });
+        settings.onChange((key) => { if(key==='showDebugger'){debuggerVisibility();if(!debuggerEnabled()){misfireOpen=false;misfire.stop('Debugger disabled in Settings');}} if (/^misfire/.test(key) && key !== 'misfireAction') misfire.stop('Debugger settings changed; refresh or start monitoring'); clearPeaks(); link.wake(); Object.keys(retryUnit).forEach((k) => delete retryUnit[k]); Object.keys(tried).forEach((k) => delete tried[k]); Object.keys(due).forEach(k=>delete due[k]); });
         ctx.loop('MAIN', 30, render);
         await render();
         poll();

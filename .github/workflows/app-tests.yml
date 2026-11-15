@@ -58,6 +58,9 @@ jobs:
       - run: node kit/tools/test_car_vitals.js
       - run: node kit/tools/test_s58_overview.js
       - run: node kit/tools/test_s58_misfire.js
+      - run: node kit/tools/test_s58_usb_export.js
+      - run: node kit/tools/test_s58_ignition.js
+      - run: node kit/tools/test_s58_poll_plan.js
       - run: node kit/tools/test_live_data.js
       - run: node kit/tools/test_zh.js
       - run: cd kit/tools && python3 test_zh.py

@@ -110,6 +110,23 @@ const quiet = { info() {}, warn() {} };
     const began=Date.now();
     assert.equal(await serial.physical(18,6,[163],200,u=>u[0]===70,{hardTimeoutMs:30,pendingTimeoutMs:200}),null);
     assert(Date.now()-began<150,'read-only wrapper forwards hard deadline through response pending');
+    // USB actions use the same complete JSON as local export, without sending any ECU requests.
+    const USB=require(path.join(ROOT,'apps/carrajaula_s58/usb-export'));
+    const oldDrives=USB.drives, oldCopy=USB.copy, sentBeforeExport=sent.length;
+    try {
+        USB.drives=()=>[{mount:'/media/test',writable:true}];
+        USB.copy=(file,mount)=>{assert.equal(mount,'/media/test');assert.equal(JSON.parse(fs.readFileSync(file)).records.length,d.records.length);return '/media/test/S58-Overview/report.json';};
+        assert(d.action('export')); assert(d.exportOpen);
+        const usbCv=new (require(path.join(ROOT,'kit/runtime/record')).Recorder)(1600,520); usbCv.own=true;
+        M.draw(usbCv,require(path.join(ROOT,'kit/runtime/themes')).theme('m_red'),d,()=>{});
+        assert(usbCv.targets.some(t=>t.key==='mf-Copy JSON to USB'));
+        assert.equal(await d.action('exportusb'),'/media/test/S58-Overview/report.json');assert(d.usbSaved);
+        USB.copy=()=>{throw Object.assign(new Error('Permission denied'),{code:'EACCES'});};
+        await assert.rejects(d.exportUsb(),/USB export failed: EACCES/);assert.equal(d.usbSaved,null);assert(!d.usbBusy);
+        USB.drives=()=>[]; d.action('usbrefresh');assert(d.message.includes('No USB drive detected'));
+        await assert.rejects(d.exportUsb(),/No USB drive selected/);
+        assert.equal(sent.length,sentBeforeExport);d.action('closeexport');assert(!d.exportOpen);
+    } finally {USB.drives=oldDrives;USB.copy=oldCopy;}
     // The existing renderer targets expose controls without a second UI framework.
     const {Recorder}=require(path.join(ROOT,'kit/runtime/record'));
     const theme=require(path.join(ROOT,'kit/runtime/themes')).theme('m_red');
@@ -121,7 +138,7 @@ const quiet = { info() {}, warn() {} };
     const lines=M.inspectorLines(d).join(' '); assert(lines.includes('TX ')&&lines.includes('interpretation UNVERIFIED'));
     const lastCount=sent.length;
     const moving=new M.Debugger({link,settings:{get:k=>settings[k]},log:quiet,dataDir:dir,telemetry:()=>({speed:50})});
-    assert.equal(moving.refresh(162),false); await assert.rejects(moving.export(),/stationary/i);
+    assert.equal(moving.refresh(162),false); await assert.rejects(moving.export(),/stationary/i); await assert.rejects(moving.exportUsb(),/stationary/i); assert.equal(moving.showExport(),false);
     assert.equal(sent.length,lastCount);
     console.log('Misfire debugger: synthetic parser, UASID, fallback, raw evidence, deltas, cancellation, serial access and export checks passed.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
