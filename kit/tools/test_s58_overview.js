@@ -24,7 +24,7 @@ const raw = { '4205': 38400, '4201': 25600, '4AB0': 51200, '4AAB': 49152,
 let monitorReply = [0x6C, 0x88].concat(new Array(36).fill(0));
 monitorReply[0x11] = 17;
 class Link {
-    constructor() { this.available = true; this.misses = {}; this.silentAfter = 5; this.stats = { sent: 0, missed: 0 }; activeLink = this; }
+    constructor(signals, log, opts) { this.requestTimeoutMs=opts&&opts.requestTimeoutMs; this.available = true; this.misses = {}; this.silentAfter = 5; this.stats = { sent: 0, missed: 0 }; activeLink = this; }
     async init() { return this; }
     wake(ecu) { ReadOnlyDiag.prototype.wake.call(this, ecu); }
     silent(ecu) { return ReadOnlyDiag.prototype.silent.call(this, ecu); }
@@ -41,9 +41,9 @@ class Link {
         if (fail || (missingAmbient && (did === '4201' || did === 'F433' || did === 'OBD 51'))) return [0x7F, sid, 0x31];
         if (slowMissing && raw[did] === undefined) now += 1500;
         if (raw[did] === undefined) return [0x7F, sid, 0x31];
-        const candidate = Object.values(SPEC.config.sources).reduce((a, b) => a.concat(b), []).find((c) => c.did === did);
+        const candidate = Object.values(SPEC.config.sources).reduce((a, b) => a.concat(b), []).find((c) => sid===0x22 ? c.did===did : c.obd&&parseInt(c.obd,16)===data[0]);
         const bytes = candidate.bytes === 1 ? [raw[did]] : [raw[did] >> 8, raw[did] & 255];
-        return [0x62].concat(data, bytes);
+        return [sid+0x40].concat(data, bytes);
     }
 }
 class FakeCar { data() { return { demo: false, rpm: 800, speed: 0, gear: 0, oil: 94, coolant: 87 }; } }
@@ -163,6 +163,16 @@ const draw = async () => { gauges.length = texts.length = 0; await frame(); retu
         diag = await diagnostics(); assert(diag.includes('disabled in Settings'), 'disabled monitor is explained');
         modes.mhdMonitor = true; now += 31000; await tick(); await draw();
         assert(texts.includes('17 %'), 'monitor can be enabled again');
+        assert.equal(activeLink.requestTimeoutMs,1500,'S58 enables a bounded diagnostic link');
+        const railKeys=['58EF','5658','F423','F459','OBD 35'], savedRail={};
+        railKeys.forEach(k=>{if(raw[k]!==undefined)savedRail[k]=raw[k];});
+        const savedBaro=raw['4201'];raw['4201']=23040; // measured 0.9 bar, not a fixed 1-bar offset
+        for(const [key,word] of [['58EF',60000],['5658',15000],['F423',2991],['F459',3000],['OBD 35',2991]]){
+            railKeys.forEach(k=>delete raw[k]);raw[key]=word;now+=31000;await tick();
+            assert(Math.abs((await draw())[4]-300)<1e-6,key+' must display the same absolute 300 bar');
+        }
+        missingAmbient=true;now+=31000;await tick();assert.equal((await draw())[4],null,'gauge rail fallback requires measured ambient');
+        missingAmbient=false;railKeys.forEach(k=>delete raw[k]);Object.assign(raw,savedRail);raw['4201']=savedBaro;now+=31000;await tick();
         const saved = Object.assign({}, raw);
         for (const did of ['4AAB', '5889', '58F3', '580F', '59D4']) delete raw[did];
         slowMissing = true; now += 31000; await tick(); // Let the per-read scheduler refill metadata after the artificial 31 s gap.
@@ -191,7 +201,13 @@ const draw = async () => { gauges.length = texts.length = 0; await frame(); retu
         assert(!reads.includes('OBD 162') && !reads.includes('F6A2'));
         await clicks.BTN_MISFIRE(); await draw();
         const refresh=lastCanvas.targets.find(t=>t.key==='mf-Refresh / Retry'); assert(refresh);
+        const captureStart=reads.length;
         await refresh.run(); await tick();
+        let betweenBoost=0;
+        for(const read of reads.slice(captureStart)){
+            if(read==='4205')betweenBoost=0;
+            else assert(++betweenBoost<=1,'misfire capture must replace, not follow, a background read');
+        }
         assert(reads.includes('OBD 162') && reads.includes('F6A2'), 'Mode 06 detection and fallback use existing transport');
         await clicks.BTN_MISFIRE(); await clicks.BTN_DIAG();
         assert.strictEqual((await draw())[0],2,'debugger probing does not stop regular boost polling');

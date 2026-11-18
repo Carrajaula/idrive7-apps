@@ -71,6 +71,7 @@ class ReadOnlyDiag {
         LINKS.set(this, diag);
         this.log = log;
         this.gapMs = (opts && opts.gapMs) || 25;
+        this.requestTimeoutMs = opts && opts.requestTimeoutMs; // optional per-request budget; other apps keep their policy
         this.silentAfter = (opts && opts.silentAfter) || 5;
         this.misses = {};             // address -> requests in a row without an answer
         this.stats = { sent: 0, replies: 0, missed: 0, silent: 0, blocked: 0, ms: 0, timed: 0 };
@@ -99,6 +100,16 @@ class ReadOnlyDiag {
         const d = Array.isArray(data) ? data.slice() : data;          // checked = sent: no change after the check
         try { check(target, sid, d, false); } catch (e) { return this.blocked(e); }
         if (this.silent(target)) return Promise.resolve(null);
+        if (this.requestTimeoutMs) {
+            const limit = this.requestTimeoutMs, prior = opts || {};
+            timeoutMs = Math.min(timeoutMs || 1500, limit);
+            opts = Object.assign({}, prior, {
+                hardTimeoutMs: Math.min(prior.hardTimeoutMs || limit, limit),
+                pendingTimeoutMs: Math.min(prior.pendingTimeoutMs || limit, limit),
+                callTimeoutMs: Math.min(prior.callTimeoutMs || limit, limit),
+                maxRetries: 0,
+            });
+        }
         return this.queue(async () => {
             this.stats.sent++;
             const t0 = Date.now();

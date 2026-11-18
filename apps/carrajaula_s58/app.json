@@ -2,7 +2,7 @@
   "id": "carrajaula_s58",
   "title": "S58 Overview",
   "description": "Read-only S58 dashboard with boost, WGDC, AFR, rail pressure, average knock retard, temperatures and MHD Active ethanol.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "vendor": "Carrajaula",
   "loggingId": "OCS1",
   "iconGlyph": "gauge",
@@ -200,19 +200,13 @@
     },
     {
       "key": "misfireTimeout",
-      "label": "Misfire reply timeout",
+      "label": "Misfire reply timeout (1.5 s maximum)",
       "type": "number",
       "unit": "s",
-      "default": 4,
+      "default": 1.5,
       "steps": [
         1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        8,
-        10
+        1.5
       ],
       "when": {
         "showDebugger": true
@@ -495,7 +489,8 @@
           "signed": false,
           "min": 0,
           "max": 500,
-          "timeoutMs": 1500
+          "timeoutMs": 1500,
+          "pressureReference": "absolute"
         },
         {
           "did": "5658",
@@ -506,7 +501,8 @@
           "signed": false,
           "min": 0,
           "max": 500,
-          "timeoutMs": 1500
+          "timeoutMs": 1500,
+          "pressureReference": "absolute"
         },
         {
           "did": "F423",
@@ -517,18 +513,20 @@
           "min": 0,
           "max": 500,
           "note": "fuel rail gauge pressure (direct injection), 10 kPa per bit",
-          "timeoutMs": 1500
+          "timeoutMs": 1500,
+          "pressureReference": "gauge"
         },
         {
           "did": "F459",
           "bytes": 2,
           "at": 0,
           "factor": 0.1,
-          "offset": -1,
+          "offset": 0,
           "min": 0,
           "max": 500,
           "note": "fuel rail absolute pressure, 10 kPa per bit",
-          "timeoutMs": 1500
+          "timeoutMs": 1500,
+          "pressureReference": "absolute"
         },
         {
           "obd": "23",
@@ -539,7 +537,8 @@
           "min": 0,
           "max": 500,
           "note": "OBD service 01 PID 0x23 (same as F423)",
-          "timeoutMs": 1500
+          "timeoutMs": 1500,
+          "pressureReference": "gauge"
         }
       ],
       "iat": [

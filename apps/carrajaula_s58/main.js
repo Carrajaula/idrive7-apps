@@ -29,10 +29,10 @@ mgu.run({
             },
         }, log).catch((e) => log.warn('S58 temperature diagnostics: ' + e));
         const car = new Car(ctx, ['rpm', 'temps', 'speed', 'gear']);
-        const link = await new ReadOnlyDiag(ctx.signals, log).init();
+        const link = await new ReadOnlyDiag(ctx.signals, log, { requestTimeoutMs: 1500 }).init();
         const cfg = ctx.spec.config, reader = new DidReader(link, { ecu: cfg.ecu });
         const live = {}, tried = {}, peaks = {}, diagnosticReads = {}, retryUnit = {}, attempts = {};
-        let pollCursor = 0; const due = {}, lastGood = {};
+        let pollCursor = 0, debugLast = false; const due = {}, lastGood = {};
         const units = Array.from(new Set([cfg.ecu].concat(Object.keys(cfg.sources).reduce((a, k) =>
             a.concat(cfg.sources[k].map((c) => c.ecu == null ? cfg.ecu : c.ecu)), []))));
         const retrySeconds = (ecu) => Math.max(0, Math.ceil(((retryUnit[ecu] || Date.now() + RETRY_MS) - Date.now()) / 1000));
@@ -74,6 +74,7 @@ mgu.run({
         }
 
         async function poll() {
+            let pollMisfire = false;
             try {
                 if (!demo() && link.available && ui.isVisible('MAIN')) {
                     // ReadOnlyDiag's pause is indefinite until wake(); retry each silent ECU at most once per 30 s.
@@ -89,8 +90,13 @@ mgu.run({
                     const keys = Object.keys(cfg.sources).concat(settings.get('mhdMonitor') === false ? [] : ['ethanolActive']).filter((k) =>
                         (k === 'ethanolActive' || cfg.sources[k].length) && Date.now() >= (tried[k] || 0));
                     const planned = Poll.plan(keys, due, Date.now(), pollCursor, live);
-                    pollCursor = planned.cursor;
-                    const work = planned.work;
+                    const debugDue = (debuggerEnabled() || ignitionOpen) &&
+                        (misfire.jobs.length || (misfire.monitoring && Date.now() >= misfire.nextPoll));
+                    pollMisfire = !!debugDue && !debugLast;
+                    debugLast = pollMisfire;
+                    if (!pollMisfire) pollCursor = planned.cursor;
+                    // A capture replaces one background read, alternating with normal gauges.
+                    const work = pollMisfire ? planned.work.filter((k) => k === 'boostAbs') : planned.work;
                     for (const k of work) {
                         if (demo() || !ui.isVisible('MAIN')) break;
                         let value, record;
@@ -99,6 +105,11 @@ mgu.run({
                             const list = cfg.sources[k], i = reader.pick[k] || 0, c = list[i];
                             value = await reader.read(c);
                             record = reader.raws[reader.key(c)];
+                            if (num(value) && k === 'rail' && c.pressureReference === 'gauge') {
+                                const ambient = fresh('baro');
+                                if (num(ambient)) { value += ambient / 100; record.value = value; }
+                                else { value = null; record.ok = false; record.why = 'measured ambient unavailable for absolute rail pressure'; }
+                            }
                             diagnosticReads[k + ':' + i] = Object.assign({}, record);
                             if (!num(value) && !record.why.startsWith('not sent:')) reader.pick[k] = (i + 1) % list.length;
                         }
@@ -115,7 +126,7 @@ mgu.run({
                     }
                 }
                 if (!demo() && ui.isVisible('MAIN') && (debuggerEnabled() || ignitionOpen)) {
-                    await misfire.step();
+                    if (pollMisfire) await misfire.step();
                     if (link.silent(cfg.ecu) && !retryUnit[cfg.ecu]) retryUnit[cfg.ecu] = Date.now() + RETRY_MS;
                 } else if (misfire.monitoring || misfire.jobs.length) misfire.stop('Capture stopped: screen hidden or demo selected');
             } catch (e) { log.warn('S58 readings: ' + e); }
@@ -236,7 +247,7 @@ mgu.run({
                     ticks: 10, tickLabels: false, hot: false, color: '#ee293d', showPeak: false });
                 const p = peaks[key];
                 cv.text('MIN ' + text(p && p.min, decimals) + '  MAX ' + text(p && p.max, decimals), x, 386, 18, t.dim, { align: 'center' });
-                const note = key === 'afr' ? 'gasoline scale' : key === 'knock' ? 'ECU mean retard' : key === 'rail' ? 'ECU rail pressure' : '';
+                const note = key === 'afr' ? 'gasoline scale' : key === 'knock' ? 'ECU mean retard' : key === 'rail' ? 'absolute pressure' : '';
                 if (note) cv.text(note, x, 414, 18, t.dim, { align: 'center' });
             });
 

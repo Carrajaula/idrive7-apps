@@ -95,7 +95,7 @@ class Debugger {
         this.exportOpen = false; this.usbDrives = []; this.usbIndex = 0; this.usbBusy = false; this.usbSaved = null;
     }
     getSetting(k, fallback) { const v = this.settings.get(k); return v == null ? fallback : v; }
-    timeout() { return Math.max(1, Math.min(10, Number(this.getSetting('misfireTimeout', 4)) || 4)) * 1000; }
+    timeout() { return Math.min(this.link.requestTimeoutMs || Infinity, Math.max(1, Math.min(10, Number(this.getSetting('misfireTimeout', 4)) || 4)) * 1000); }
     interval() { return Math.max(5, Math.min(120, Number(this.getSetting('misfireInterval', 10)) || 10)) * 1000; }
     stationary() { const s = this.telemetry().speed; return num(s) && s >= 0 && s < 0.5; }
     stop(reason) { this.monitoring = false; this.jobs = []; this.generation++; this.message = reason || 'Monitoring stopped; captured data retained'; }

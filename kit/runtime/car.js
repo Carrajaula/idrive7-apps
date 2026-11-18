@@ -103,7 +103,10 @@ class Car {
             return raw * c.factor + (c.offset || 0);
         };
         const put = (k, v, tick) => {
-            if (v === null || v === undefined || (typeof v === 'number' && !isFinite(v))) return;
+            if (v === null || v === undefined || (typeof v === 'number' && !isFinite(v))) {
+                if (k === 'oil' || k === 'coolant') delete this.live[k];
+                return;
+            }
             this.live[k] = v; this.lastCar = Date.now();
             // learned gear while driving; nothing at a standstill - the guess can't tell P, N or D
             // there, and "N" shown in park or in D was wrong

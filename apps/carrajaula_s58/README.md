@@ -20,6 +20,9 @@ No map switching, actuator commands, memory writes, or ECU changes are made.
 - LPFP: DIDs 58F3 / 5463, from the existing low-pressure sensor mappings. The
   manifold-relative OBD rail-pressure candidate is deliberately not used as LPFP.
 - RAIL ACTUAL: DIDs 58EF / 5658, then M Vitals' standard rail-pressure candidates.
+  All candidates display **absolute bar**. Gauge-pressure F423 / OBD 23 add the
+  measured ambient pressure; without it those fallbacks are unavailable. F459
+  already returns absolute pressure and has no fixed 1-bar subtraction.
   This is one generic reported rail pressure, not a verified identification of
   pump 1. It does not measure pump duty, flow or mechanical health.
 - KNK AVG: DID 554C, the existing Live Data ECU-computed mean of cylinder-specific
@@ -31,7 +34,9 @@ No map switching, actuator commands, memory writes, or ECU changes are made.
   candidate still needs validation on the S58, as do the other native candidates.
   Source: [diagnostic catalog](https://emdzej.github.io/ediabasx-docs-sgbd/sgbd/dme8ff_r/).
 - IAT / charge air: DIDs 580F / 59D4; IAT also has M Vitals' existing candidates.
-- Oil / coolant: the existing Car SOME/IP temperature reader.
+- Oil / coolant: the shared Car SOME/IP temperature reader. An invalid or missing
+  temperature field clears that channel until a valid signal arrives; unchanged
+  valid temperatures are retained because notifications may be change-only.
 - Gearbox: M Vitals' EGS 6000 / DA12 candidates, ECU 0x18.
 - Ethanol Active: the exact MHD request `2C 88 01`, to physical DME 0x12 only.
   The reply must be `6C 88` plus exactly 36 data bytes. Body offset 0x0F
@@ -91,7 +96,7 @@ Working readings refresh before one fallback candidate per round, rather than
 waiting behind a sweep of unsupported identifiers. A candidate that works stays
 selected; failed candidates rotate and back off after a complete failed cycle.
 Native UDS, OBD and MHD reads wait 1500 ms, matching Live Data's normal read window
-(the previous S58 window was 1200 ms). Response-pending handling is unchanged.
+(the previous S58 window was 1200 ms). See the 0.3.1 section below for the overall deadline now applied to pending replies.
 
 For short replies and timeouts, the spare diagnostic line shows elapsed ms, the
 TASU method verdict, pending-response count, observed TASU errors/rejects, or the
@@ -133,7 +138,7 @@ DME 0x12, only A0 and A2..A7. Other non-reading commands remain blocked.
    repeats these scans; **Stop monitoring** cancels queued work. An already-sent
    request can finish within its deadline; its late response is retained as
    cancelled and cannot update the live tiles. Leaving the app stops monitoring.
-4. The reply timeout is configurable (1..10 s, default 4), including a hard cap
+4. The reply timeout is configurable (1 or 1.5 s, default 1.5), including a hard cap
    for response-pending waits. Scans wait a configurable 5..120 s after completion
    (default 10 s). Only one debugger request is in flight. Regular telemetry and
    the debugger are serialized by the same queue.
@@ -300,3 +305,21 @@ backoff and read-only restrictions. A slow individual ECU reply or an explicitly
 requested raw monitor scan can still delay polling; car responsiveness must be
 validated on the head unit. Synthetic 178 ms reply tests keep healthy boost reads
 within 500 ms; this is not a measured vehicle guarantee.
+
+## Retrieval corrections (0.3.1)
+
+S58 opts into a 1500 ms maximum for each physical diagnostic request: the TASU
+method call, pending-response wait and overall reply deadline are bounded, with
+no transport-busy retries within that request. Other apps retain their existing
+link policy. This bounds blocking; it does not guarantee a sub-second refresh
+when the ECU is slow, or establish the cause of a driving-related dropout.
+
+A queued misfire capture takes the background slot on alternating rounds, with
+boost read first. It cannot add a third diagnostic request after boost and a
+normal gauge read. The debugger reports the actual capped timeout, including
+when an older saved setting requests a longer wait. Failed reads keep their raw
+transport evidence and remain unavailable; the existing ECU recovery applies.
+
+Run `node kit/tools/test_s58_retrieval.js` and
+`node kit/tools/test_s58_overview.js` for the deadline, pending response, queue
+scheduling, rail-reference, invalid-temperature and recovery regressions.
